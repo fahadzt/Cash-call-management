@@ -1,0 +1,72 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Allow all operations for development (emulator)
+    // In production, you should use the more restrictive rules below
+    
+    // Users collection
+    match /users/{userId} {
+      allow read, write: if request.auth != null;
+    }
+    
+    // Affiliates collection
+    match /affiliates/{affiliateId} {
+      allow read, write: if request.auth != null;
+    }
+    
+    // Cash calls collection
+    match /cash_calls/{cashCallId} {
+      allow read, write: if request.auth != null;
+    }
+    
+    // Comments collection
+    match /comments/{commentId} {
+      allow read, write: if request.auth != null;
+    }
+    
+    // Activity logs collection
+    match /activity_logs/{logId} {
+      allow read, write: if request.auth != null;
+    }
+    
+    // Committees collection
+    match /committees/{committeeId} {
+      allow read, write: if request.auth != null;
+    }
+    
+    // Checklist templates collection
+    match /checklist_templates/{templateId} {
+      allow read, write: if request.auth != null;
+    }
+    
+    // Checklist items collection
+    match /checklist_items/{itemId} {
+      allow read, write: if request.auth != null;
+    }
+    
+    // Affiliate checklists collection
+    match /affiliate_checklists/{checklistId} {
+      allow read, write: if request.auth != null;
+    }
+    
+    // Checklist responses collection
+    match /checklist_responses/{responseId} {
+      allow read, write: if request.auth != null;
+    }
+    
+    // Stakeholders collection
+    match /stakeholders/{stakeholderId} {
+      allow read, write: if request.auth != null;
+    }
+    
+    // Notifications collection
+    match /notifications/{notificationId} {
+      allow read, write: if request.auth != null;
+    }
+    
+    // Cash call approvals collection
+    match /cash_call_approvals/{approvalId} {
+      allow read, write: if request.auth != null;
+    }
+  }
+} 

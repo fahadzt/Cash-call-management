@@ -1,0 +1,174 @@
+{
+  "firestore": {
+    "rules": {
+      "rules_version": "2",
+      "service": "cloud.firestore",
+      "match": {
+        "databases/{database}/documents": {
+          // Users collection
+          "users/{userId}": {
+            "allow": {
+              "read": "request.auth != null && (request.auth.uid == resource.data.id || resource.data.role == 'admin')",
+              "write": "request.auth != null && request.auth.uid == resource.data.id",
+              "create": "request.auth != null && request.auth.uid == resource.data.id"
+            }
+          },
+          
+          // Affiliates collection
+          "affiliates/{affiliateId}": {
+            "allow": {
+              "read": "request.auth != null",
+              "write": "request.auth != null && (get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role in ['admin', 'approver', 'affiliate'])",
+              "create": "request.auth != null && (get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role in ['admin', 'approver'])",
+              "delete": "request.auth != null && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin'"
+            }
+          },
+          
+          // Cash calls collection
+          "cash_calls/{cashCallId}": {
+            "allow": {
+              "read": "request.auth != null",
+              "write": "request.auth != null && (get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role in ['admin', 'approver', 'affiliate'])",
+              "create": "request.auth != null && (get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role in ['admin', 'approver', 'affiliate'])",
+              "delete": "request.auth != null && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin'"
+            }
+          },
+          
+          // Comments collection
+          "comments/{commentId}": {
+            "allow": {
+              "read": "request.auth != null",
+              "write": "request.auth != null && (resource.data.user_id == request.auth.uid || get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role in ['admin', 'approver'])",
+              "create": "request.auth != null",
+              "delete": "request.auth != null && (resource.data.user_id == request.auth.uid || get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role in ['admin', 'approver'])"
+            }
+          },
+          
+          // Activity logs collection
+          "activity_logs/{logId}": {
+            "allow": {
+              "read": "request.auth != null && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role in ['admin', 'approver']",
+              "write": "request.auth != null && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role in ['admin', 'approver']",
+              "create": "request.auth != null"
+            }
+          },
+          
+          // Committees collection
+          "committees/{committeeId}": {
+            "allow": {
+              "read": "request.auth != null",
+              "write": "request.auth != null && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin'",
+              "create": "request.auth != null && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin'",
+              "delete": "request.auth != null && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin'"
+            }
+          },
+          
+          // Checklist templates collection
+          "checklist_templates/{templateId}": {
+            "allow": {
+              "read": "request.auth != null",
+              "write": "request.auth != null && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role in ['admin', 'approver']",
+              "create": "request.auth != null && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role in ['admin', 'approver']",
+              "delete": "request.auth != null && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin'"
+            }
+          },
+          
+          // Checklist items collection
+          "checklist_items/{itemId}": {
+            "allow": {
+              "read": "request.auth != null",
+              "write": "request.auth != null && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role in ['admin', 'approver']",
+              "create": "request.auth != null && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role in ['admin', 'approver']",
+              "delete": "request.auth != null && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin'"
+            }
+          },
+          
+          // Affiliate checklists collection
+          "affiliate_checklists/{checklistId}": {
+            "allow": {
+              "read": "request.auth != null",
+              "write": "request.auth != null && (get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role in ['admin', 'approver', 'affiliate'])",
+              "create": "request.auth != null && (get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role in ['admin', 'approver'])",
+              "delete": "request.auth != null && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin'"
+            }
+          },
+          
+          // Checklist responses collection
+          "checklist_responses/{responseId}": {
+            "allow": {
+              "read": "request.auth != null",
+              "write": "request.auth != null && (resource.data.submitted_by == request.auth.uid || get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role in ['admin', 'approver'])",
+              "create": "request.auth != null",
+              "delete": "request.auth != null && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin'"
+            }
+          },
+          
+          // Stakeholders collection
+          "stakeholders/{stakeholderId}": {
+            "allow": {
+              "read": "request.auth != null",
+              "write": "request.auth != null && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role in ['admin', 'approver']",
+              "create": "request.auth != null && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role in ['admin', 'approver']",
+              "delete": "request.auth != null && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin'"
+            }
+          },
+          
+          // Notifications collection
+          "notifications/{notificationId}": {
+            "allow": {
+              "read": "request.auth != null && resource.data.user_id == request.auth.uid",
+              "write": "request.auth != null && resource.data.user_id == request.auth.uid",
+              "create": "request.auth != null",
+              "delete": "request.auth != null && (resource.data.user_id == request.auth.uid || get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin')"
+            }
+          },
+          
+          // Cash call approvals collection
+          "cash_call_approvals/{approvalId}": {
+            "allow": {
+              "read": "request.auth != null",
+              "write": "request.auth != null && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role in ['admin', 'approver']",
+              "create": "request.auth != null && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role in ['admin', 'approver']",
+              "delete": "request.auth != null && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin'"
+            }
+          }
+        }
+      }
+    }
+  },
+  "storage": {
+    "rules": {
+      "rules_version": "2",
+      "service": "firebase.storage",
+      "match": {
+        "b/{bucket}/o": {
+          // Avatar images
+          "match": {
+            "avatars/{userId}/{allPaths=**}": {
+              "allow": {
+                "read": "request.auth != null",
+                "write": "request.auth != null && request.auth.uid == userId"
+              }
+            },
+            
+            // Documents
+            "documents/{allPaths=**}": {
+              "allow": {
+                "read": "request.auth != null",
+                "write": "request.auth != null && (get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role in ['admin', 'approver', 'affiliate'])"
+              }
+            },
+            
+            // Public assets
+            "public/{allPaths=**}": {
+              "allow": {
+                "read": true,
+                "write": "request.auth != null && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin'"
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+} 
