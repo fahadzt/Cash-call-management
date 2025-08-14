@@ -14,6 +14,7 @@ export interface User {
   phone?: string
   is_active: boolean
   last_login?: string
+  affiliate_company_id?: string
   created_at: string
   updated_at: string
 }

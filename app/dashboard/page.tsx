@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useEffect } from "react"
+import { useState, useEffect, useMemo, useCallback } from "react"
 import { useRouter } from "next/navigation"
 import Image from "next/image"
 import { Button } from "@/components/ui/button"
@@ -34,6 +34,7 @@ import {
   BarChart3,
   Shield,
   CheckSquare,
+  Settings,
 } from "lucide-react"
 import { useAuth } from "@/lib/firebase-auth-context"
 import { 
@@ -44,36 +45,43 @@ import {
   getUsers,
   signOutUser,
   seedSampleData,
+  getStatusOptions,
+  getCashCallsForUser,
   type CashCall, 
   type Affiliate,
-  type User
+  type User,
+  type StatusOption
 } from "@/lib/firebase-database"
 import { AdminSettings } from "@/components/admin-settings"
-import { ReportingDashboard } from "@/components/reporting-dashboard"
+
 import { ExportButton } from "@/components/export-functions"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { AffiliateProfile } from "@/components/affiliate-profile"
 import { AuditMode } from "@/components/audit-mode"
 import { AnimatedLoading } from "@/components/animated-loading"
+import { NotificationProvider, NotificationBell, useStatusChangeNotifications } from "@/components/notification-system"
+import { BulkImportExport } from "@/components/bulk-import-export"
+import { AdvancedSearch, SearchFilter } from "@/components/advanced-search"
+import { DashboardCustomization, DashboardWidget } from "@/components/dashboard-customization"
 
-interface FilterState {
-  search: string
-  status: string
-  affiliate: string
-  approver: string
-  dateFrom: string
-  dateTo: string
-  amountMin: string
-  amountMax: string
-}
+// Use the SearchFilter interface from advanced-search component
+type FilterState = SearchFilter
 
-export default function Dashboard() {
+function DashboardContent() {
   const { user, userProfile, signOut } = useAuth()
+  const { notifyStatusChange } = useStatusChangeNotifications()
   const [cashCalls, setCashCalls] = useState<CashCall[]>([])
   const [affiliates, setAffiliates] = useState<Affiliate[]>([])
   const [users, setUsers] = useState<User[]>([])
+  const [statusOptions, setStatusOptions] = useState<StatusOption[]>([])
   const [filteredCashCalls, setFilteredCashCalls] = useState<CashCall[]>([])
+  
+  // Pagination state
+  const [currentPage, setCurrentPage] = useState(1)
+  const [itemsPerPage] = useState(10)
+  const [totalItems, setTotalItems] = useState(0)
   const [filters, setFilters] = useState<FilterState>({
+    name: "",
     search: "",
     status: "all",
     affiliate: "all",
@@ -89,10 +97,16 @@ export default function Dashboard() {
   const [isCreating, setIsCreating] = useState(false)
   const [isRefreshing, setIsRefreshing] = useState(false)
   const [error, setError] = useState("")
+  const [retryCount, setRetryCount] = useState(0)
+  const [lastError, setLastError] = useState<string | null>(null)
   const router = useRouter()
   const [activeTab, setActiveTab] = useState("dashboard")
-  const [activeView, setActiveView] = useState<"dashboard" | "reports" | "affiliate" | "audit">("dashboard")
+  const [activeView, setActiveView] = useState<"dashboard" | "affiliate" | "audit">("dashboard")
   const [selectedAffiliateId, setSelectedAffiliateId] = useState<string | null>(null)
+  
+  // Bulk operations state
+  const [selectedItems, setSelectedItems] = useState<Set<string>>(new Set())
+  const [isBulkActionOpen, setIsBulkActionOpen] = useState(false)
 
   // New cash call form state
   const [newCashCall, setNewCashCall] = useState({
@@ -102,6 +116,16 @@ export default function Dashboard() {
     justification: "",
   })
 
+  // Debug dialog state changes
+  useEffect(() => {
+    console.log('Debug - Dialog state changed:', {
+      isNewCashCallOpen,
+      userRole: userProfile?.role,
+      userAffiliateId: userProfile?.affiliate_company_id,
+      newCashCallAffiliateId: newCashCall.affiliateId
+    })
+  }, [isNewCashCallOpen, userProfile?.role, userProfile?.affiliate_company_id, newCashCall.affiliateId])
+
   // Check authentication on mount
   useEffect(() => {
     if (!user) {
@@ -109,6 +133,26 @@ export default function Dashboard() {
       return
     }
   }, [user, router])
+
+  // Auto-set affiliate ID for affiliate users when dialog opens
+  useEffect(() => {
+    if (isNewCashCallOpen && userProfile?.role === 'affiliate' && userProfile?.affiliate_company_id) {
+      console.log('Debug - Auto-setting affiliateId:', userProfile.affiliate_company_id)
+      setNewCashCall(prev => ({
+        ...prev,
+        affiliateId: userProfile.affiliate_company_id || ''
+      }))
+    }
+  }, [isNewCashCallOpen, userProfile?.role, userProfile?.affiliate_company_id])
+
+  // Debug: Log when userProfile changes
+  useEffect(() => {
+    console.log('Debug - userProfile changed:', {
+      role: userProfile?.role,
+      affiliate_company_id: userProfile?.affiliate_company_id,
+      email: userProfile?.email
+    })
+  }, [userProfile])
 
   // Load cash calls and affiliates when user is set
   useEffect(() => {
@@ -119,27 +163,81 @@ export default function Dashboard() {
 
   useEffect(() => {
     applyFilters()
+    setCurrentPage(1) // Reset to first page when filters change
   }, [filters, cashCalls])
+
+  // Keyboard shortcuts
+  useEffect(() => {
+    const handleKeyPress = (e: KeyboardEvent) => {
+      if (e.ctrlKey || e.metaKey) {
+        switch(e.key) {
+          case 'n':
+            e.preventDefault()
+            setIsNewCashCallOpen(true)
+            break
+          case 'f':
+            e.preventDefault()
+            setIsFilterOpen(true)
+            break
+          case 'r':
+            e.preventDefault()
+            handleRefresh()
+            break
+        }
+      }
+    }
+    
+    document.addEventListener('keydown', handleKeyPress)
+    return () => document.removeEventListener('keydown', handleKeyPress)
+  }, [])
 
   const loadData = async () => {
     try {
       setIsLoading(true)
       setError("")
       setIsRefreshing(true)
+      setLastError(null)
 
-      const [cashCallsData, affiliatesData, usersData] = await Promise.all([
-        getCashCalls(),
+      if (!user || !userProfile) {
+        setError("User not authenticated")
+        return
+      }
+
+      // Use role-based access control
+      const [cashCallsData, affiliatesData, statusOptionsData] = await Promise.all([
+        getCashCallsForUser(user.uid, userProfile.role || 'viewer', userProfile.affiliate_company_id),
         getAffiliates(),
-        getUsers(),
+        getStatusOptions(),
       ])
+
+      console.log('Debug - Loaded data:', {
+        userRole: userProfile.role,
+        userAffiliateId: userProfile.affiliate_company_id,
+        cashCallsCount: cashCallsData.length,
+        cashCalls: cashCallsData.map(cc => ({ id: cc.id, affiliate_id: cc.affiliate_id, status: cc.status })),
+        affiliatesCount: affiliatesData.length
+      })
 
       setCashCalls(cashCallsData)
       setAffiliates(affiliatesData)
-      setUsers(usersData)
-      setFilteredCashCalls(cashCallsData)
+      setStatusOptions(statusOptionsData)
+
+      // Set active tab to first cash call if available
+      if (cashCallsData.length > 0 && !activeTab) {
+        setActiveTab(cashCallsData[0].id)
+      }
     } catch (err) {
       console.error("Error loading data:", err)
-      setError("Failed to load data. Please try refreshing the page.")
+      const errorMessage = err instanceof Error ? err.message : "Failed to load data"
+      setLastError(errorMessage)
+      setRetryCount(prev => prev + 1)
+      
+      if (retryCount < 3) {
+        setError(`Failed to load data (attempt ${retryCount + 1}/3). Retrying...`)
+        setTimeout(() => loadData(), 1000 * (retryCount + 1))
+      } else {
+        setError("Failed to load data after multiple attempts. Please check your connection and try again.")
+      }
     } finally {
       setIsLoading(false)
       setIsRefreshing(false)
@@ -208,6 +306,7 @@ export default function Dashboard() {
 
   const clearFilters = () => {
     setFilters({
+      name: "",
       search: "",
       status: "all",
       affiliate: "all",
@@ -259,13 +358,44 @@ export default function Dashboard() {
   }
 
   const handleCreateCashCall = async (isDraft = false) => {
-    if (!newCashCall.affiliateId || !newCashCall.amountRequested) {
-      setError("Please fill in all required fields")
+    // Check authentication first
+    if (!user?.uid) {
+      setError("You must be logged in to create a cash call")
       return
     }
 
-    if (!user?.uid) {
-      setError("You must be logged in to create a cash call")
+    // Check if user profile is loaded
+    if (!userProfile) {
+      setError("User profile not loaded. Please refresh the page and try again.")
+      return
+    }
+
+
+
+    // For affiliate users, automatically set their affiliate company ID
+    const affiliateId = userProfile?.role === 'affiliate' 
+      ? userProfile.affiliate_company_id 
+      : newCashCall.affiliateId
+
+    console.log('Debug - Creating cash call:', {
+      userRole: userProfile?.role,
+      userAffiliateId: userProfile?.affiliate_company_id,
+      newCashCallAffiliateId: newCashCall.affiliateId,
+      finalAffiliateId: affiliateId,
+      amountRequested: newCashCall.amountRequested,
+      userId: user.uid,
+      isAuthenticated: !!user.uid
+    })
+
+    if (!affiliateId || !newCashCall.amountRequested) {
+      setError("Please fill in all required fields")
+      console.log('Debug - Validation failed:', { affiliateId, amountRequested: newCashCall.amountRequested })
+      return
+    }
+
+    // Enforce affiliate company restrictions
+    if (userProfile?.role === 'affiliate' && userProfile?.affiliate_company_id !== affiliateId) {
+      setError("You can only create cash calls for your own affiliate company")
       return
     }
 
@@ -281,7 +411,7 @@ export default function Dashboard() {
     try {
       const cashCallData = {
         call_number: `CC-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
-        affiliate_id: newCashCall.affiliateId,
+        affiliate_id: affiliateId,
         amount_requested: amount,
         description: newCashCall.description || undefined,
         created_by: user.uid,
@@ -292,26 +422,37 @@ export default function Dashboard() {
         compliance_status: "pending" as const,
       }
 
+      console.log('Debug - Attempting to create cash call with data:', cashCallData)
+
       const newCallId = await createCashCall(cashCallData)
 
-      // Add the new cash call to the list
-      const newCall = {
-        id: newCallId,
-        ...cashCallData,
-        created_at: new Date(),
-        updated_at: new Date(),
-      } as CashCall
+      console.log('Debug - Cash call created successfully:', {
+        newCallId,
+        cashCallData,
+        userAffiliateId: userProfile?.affiliate_company_id
+      })
 
-      setCashCalls([newCall, ...cashCalls])
+      console.log('Debug - Reloading data after cash call creation...')
+      // Reload data to ensure we have the latest state from the database
+      await loadData()
+      console.log('Debug - Data reloaded after cash call creation')
 
       // Reset form and close dialog
       setNewCashCall({ affiliateId: "", amountRequested: "", description: "", justification: "" })
       setIsNewCashCallOpen(false)
 
       setError("")
-    } catch (err) {
+    } catch (err: any) {
       console.error("Error creating cash call:", err)
-      setError("Failed to create cash call. Please try again.")
+      
+      // Handle specific Firebase permission errors
+      if (err.code === 'permission-denied' || err.message?.includes('permission')) {
+        setError("Permission denied. Please check your authentication status and try again.")
+      } else if (err.code === 'unauthenticated') {
+        setError("You are not authenticated. Please log in again.")
+      } else {
+        setError(`Failed to create cash call: ${err.message || 'Unknown error'}`)
+      }
     } finally {
       setIsCreating(false)
     }
@@ -323,12 +464,30 @@ export default function Dashboard() {
       return
     }
 
+    // Check if user can modify this cash call
+    const cashCall = cashCalls.find(call => call.id === cashCallId)
+    if (!cashCall) {
+      setError("Cash call not found")
+      return
+    }
+
+    // Enforce role-based access control
+    if (userProfile?.role === 'affiliate' && cashCall.affiliate_id !== userProfile.affiliate_company_id) {
+      setError("You can only update cash calls for your own affiliate company")
+      return
+    }
+
     try {
       setError("")
+      const oldStatus = cashCall.status || 'unknown'
       await updateCashCall(cashCallId, { status: newStatus as any }, user.uid)
 
       // Update the cash call in the list
       setCashCalls(cashCalls.map((call) => (call.id === cashCallId ? { ...call, status: newStatus as any } : call)))
+      
+      // Send notification
+      const affiliateName = affiliates.find(aff => aff.id === cashCall.affiliate_id)?.name || 'Unknown Affiliate'
+      notifyStatusChange(cashCallId, oldStatus, newStatus, affiliateName)
     } catch (err) {
       console.error("Error updating status:", err)
       setError("Failed to update status. Please try again.")
@@ -341,14 +500,92 @@ export default function Dashboard() {
     }
   }
 
+  // Pagination calculations
+  const totalPages = Math.ceil(filteredCashCalls.length / itemsPerPage)
+  const startIndex = (currentPage - 1) * itemsPerPage
+  const endIndex = startIndex + itemsPerPage
+  const paginatedCashCalls = filteredCashCalls.slice(startIndex, endIndex)
+
+  const handlePageChange = (page: number) => {
+    setCurrentPage(page)
+  }
+
+  // Bulk operations
+  const handleSelectItem = (itemId: string) => {
+    const newSelected = new Set(selectedItems)
+    if (newSelected.has(itemId)) {
+      newSelected.delete(itemId)
+    } else {
+      newSelected.add(itemId)
+    }
+    setSelectedItems(newSelected)
+  }
+
+  const handleSelectAll = () => {
+    if (selectedItems.size === paginatedCashCalls.length) {
+      setSelectedItems(new Set())
+    } else {
+      setSelectedItems(new Set(paginatedCashCalls.map(item => item.id)))
+    }
+  }
+
+  const handleBulkAction = async (action: 'approve' | 'reject' | 'mark-paid') => {
+    if (!user?.uid || selectedItems.size === 0) return
+
+    // Check if user can modify all selected cash calls
+    const selectedCashCalls = cashCalls.filter(call => selectedItems.has(call.id))
+    
+    if (userProfile?.role === 'affiliate') {
+      const unauthorizedCalls = selectedCashCalls.filter(call => call.affiliate_id !== userProfile.affiliate_company_id)
+      if (unauthorizedCalls.length > 0) {
+        setError("You can only update cash calls for your own affiliate company")
+        return
+      }
+    }
+
+    try {
+      setError("")
+      const promises = Array.from(selectedItems).map(itemId => {
+        const newStatus = action === 'approve' ? 'approved' : action === 'reject' ? 'rejected' : 'paid'
+        return updateCashCall(itemId, { status: newStatus as any }, user.uid!)
+      })
+
+      await Promise.all(promises)
+      
+      // Update local state
+      setCashCalls(cashCalls.map(call => 
+        selectedItems.has(call.id) 
+          ? { ...call, status: action === 'approve' ? 'approved' : action === 'reject' ? 'rejected' : 'paid' as any }
+          : call
+      ))
+      
+      setSelectedItems(new Set())
+      setIsBulkActionOpen(false)
+    } catch (err) {
+      console.error("Error performing bulk action:", err)
+      setError("Failed to perform bulk action. Please try again.")
+    }
+  }
+
   const handleRowClick = (cashCallId: string) => {
     router.push(`/cash-call/${cashCallId}`)
   }
 
-  const handleAffiliateClick = (affiliateId: string) => {
+  // Memoized calculations for better performance
+  const memoizedStats = useMemo(() => ({
+    totalCalls: cashCalls.length,
+    underReview: cashCalls.filter(c => c.status === "under_review").length,
+    approved: cashCalls.filter(c => c.status === "approved").length,
+    totalAmount: cashCalls.reduce((sum, call) => sum + call.amount_requested, 0),
+    pendingAmount: cashCalls
+      .filter(call => call.status === 'under_review')
+      .reduce((sum, call) => sum + call.amount_requested, 0)
+  }), [cashCalls])
+
+  const handleAffiliateClick = useCallback((affiliateId: string) => {
     setSelectedAffiliateId(affiliateId)
     setActiveView("affiliate")
-  }
+  }, [])
 
   if (isLoading) {
     return <AnimatedLoading message="Loading Dashboard..." />
@@ -381,12 +618,36 @@ export default function Dashboard() {
               </h1>
               <p className="text-gray-600">
                 Welcome back, {userProfile?.full_name || user.email} •{" "}
-                {userProfile?.role?.charAt(0).toUpperCase() + userProfile?.role?.slice(1)}
+                {userProfile?.role ? userProfile.role.charAt(0).toUpperCase() + userProfile.role.slice(1) : 'User'}
               </p>
             </div>
           </div>
           <div className="flex items-center gap-2">
+            <NotificationBell />
+            
             <AdminSettings currentUser={userProfile} onDataChange={loadData} />
+
+            <Button
+              onClick={() => router.push('/reports')}
+              variant="outline"
+              size="sm"
+              className="border-[#0033A0] text-[#0033A0] hover:bg-[#0033A0]/10 bg-transparent"
+            >
+              <BarChart3 className="h-4 w-4 mr-2" />
+              Reports
+            </Button>
+
+            {userProfile?.role === 'admin' && (
+              <Button
+                onClick={() => router.push('/settings')}
+                variant="outline"
+                size="sm"
+                className="border-[#0033A0] text-[#0033A0] hover:bg-[#0033A0]/10 bg-transparent"
+              >
+                <Settings className="h-4 w-4 mr-2" />
+                Settings
+              </Button>
+            )}
 
             <Button
               onClick={handleRefresh}
@@ -432,6 +693,70 @@ export default function Dashboard() {
       )}
 
       <div className="p-6">
+        {/* Quick Actions Bar */}
+        <Card className="aramco-card-bg mb-6">
+          <CardContent className="pt-6">
+            <div className="flex flex-wrap items-center gap-4">
+              <div className="flex items-center gap-2">
+                <span className="text-sm font-medium text-[#0033A0]">Quick Actions:</span>
+              </div>
+              
+              <BulkImportExport
+                cashCalls={cashCalls}
+                affiliates={affiliates}
+                onImport={async (data) => {
+                  // Handle bulk import
+                  console.log('Importing data:', data)
+                  // TODO: Implement bulk import logic
+                }}
+                onExport={(format) => {
+                  // Handle bulk export
+                  console.log('Exporting in format:', format)
+                  // TODO: Implement bulk export logic
+                }}
+              />
+              
+              <DashboardCustomization
+                cashCalls={cashCalls}
+                affiliates={affiliates}
+                onLayoutChange={(widgets) => {
+                  console.log('Layout changed:', widgets)
+                  // TODO: Implement layout change logic
+                }}
+              />
+              
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => router.push('/checklist')}
+                className="border-[#0033A0] text-[#0033A0] hover:bg-[#0033A0]/10"
+              >
+                <CheckSquare className="h-4 w-4 mr-2" />
+                Checklists
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setIsNewCashCallOpen(true)}
+                className="border-[#0033A0] text-[#0033A0] hover:bg-[#0033A0]/10"
+              >
+                <Plus className="h-4 w-4 mr-2" />
+                New Cash Call (Ctrl+N)
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={handleRefresh}
+                className="border-[#0033A0] text-[#0033A0] hover:bg-[#0033A0]/10"
+                disabled={isRefreshing}
+              >
+                <RefreshCw className={`h-4 w-4 mr-2 ${isRefreshing ? "animate-spin" : ""}`} />
+                Refresh (Ctrl+R)
+              </Button>
+            </div>
+          </CardContent>
+        </Card>
+
         {/* Stats Cards */}
         <div className="grid grid-cols-1 md:grid-cols-4 gap-6 mb-8">
           <Card className="aramco-card-bg border-l-4 border-l-[#0033A0] hover:scale-105 transition-all duration-300">
@@ -440,7 +765,7 @@ export default function Dashboard() {
               <TrendingUp className="h-4 w-4 text-[#0033A0]" />
             </CardHeader>
             <CardContent>
-              <div className="text-3xl font-bold text-[#0033A0]">{cashCalls.length}</div>
+              <div className="text-3xl font-bold text-[#0033A0]">{memoizedStats.totalCalls}</div>
             </CardContent>
           </Card>
 
@@ -451,7 +776,7 @@ export default function Dashboard() {
             </CardHeader>
             <CardContent>
               <div className="text-3xl font-bold text-[#00A3E0]">
-                {cashCalls.filter((c) => c.status === "under_review").length}
+                {memoizedStats.underReview}
               </div>
             </CardContent>
           </Card>
@@ -463,7 +788,13 @@ export default function Dashboard() {
             </CardHeader>
             <CardContent>
               <div className="text-3xl font-bold text-[#00843D]">
-                {cashCalls.filter((c) => c.status === "approved").length}
+                {memoizedStats.approved}
+              </div>
+              <div className="text-sm text-gray-500 mt-1">
+                {memoizedStats.totalCalls > 0 
+                  ? `${Math.round((memoizedStats.approved / memoizedStats.totalCalls) * 100)}% approval rate`
+                  : 'No cash calls yet'
+                }
               </div>
             </CardContent>
           </Card>
@@ -475,7 +806,10 @@ export default function Dashboard() {
             </CardHeader>
             <CardContent>
               <div className="text-3xl font-bold text-[#84BD00]">
-                ${cashCalls.reduce((sum, call) => sum + call.amount_requested, 0).toLocaleString()}
+                ${memoizedStats.totalAmount.toLocaleString()}
+              </div>
+              <div className="text-sm text-gray-500 mt-1">
+                Pending: ${memoizedStats.pendingAmount.toLocaleString()}
               </div>
             </CardContent>
           </Card>
@@ -484,21 +818,13 @@ export default function Dashboard() {
         {/* Main Content with Tabs */}
         <Tabs value={activeView} onValueChange={(value) => setActiveView(value as any)} className="space-y-6">
           <div className="flex flex-col items-center space-y-4">
-            <TabsList className="grid w-full max-w-3xl grid-cols-5 bg-white/80 backdrop-blur-sm">
+            <TabsList className="grid w-full max-w-3xl grid-cols-4 bg-white/80 backdrop-blur-sm">
               <TabsTrigger
                 value="dashboard"
                 onClick={() => setActiveView("dashboard")}
                 className="data-[state=active]:bg-[#0033A0] data-[state=active]:text-white"
               >
                 Dashboard
-              </TabsTrigger>
-              <TabsTrigger
-                value="reports"
-                onClick={() => setActiveView("reports")}
-                className="data-[state=active]:bg-[#0033A0] data-[state=active]:text-white"
-              >
-                <BarChart3 className="h-4 w-4 mr-2" />
-                Reports
               </TabsTrigger>
               <TabsTrigger
                 value="checklist"
@@ -526,165 +852,25 @@ export default function Dashboard() {
           </div>
 
           <TabsContent value="dashboard" className="space-y-6">
-            {/* Filters and Actions */}
+            {/* Advanced Search and Actions */}
             <Card className="aramco-card-bg">
               <CardContent className="pt-6">
                 <div className="flex flex-col lg:flex-row gap-4 items-center justify-between">
-                  <div className="flex flex-col md:flex-row gap-4 flex-1">
-                    <div className="relative flex-1 max-w-sm">
-                      <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400 h-4 w-4" />
-                      <Input
-                        placeholder="Search by affiliate, ID, or description..."
-                        value={filters.search}
-                        onChange={(e) => setFilters({ ...filters, search: e.target.value })}
-                        className="pl-10 bg-white border-gray-300 text-gray-900 placeholder-gray-500 focus:border-[#00A3E0] focus:ring-[#00A3E0]"
-                      />
-                    </div>
-
-                    <Dialog open={isFilterOpen} onOpenChange={setIsFilterOpen}>
-                      <DialogTrigger asChild>
-                        <Button
-                          variant="outline"
-                          className="border-[#0033A0] text-[#0033A0] hover:bg-[#0033A0]/10 bg-transparent relative"
-                        >
-                          <Filter className="h-4 w-4 mr-2" />
-                          Advanced Filters
-                          {activeFiltersCount > 0 && (
-                            <Badge className="ml-2 bg-[#0033A0] text-white text-xs px-1.5 py-0.5 min-w-[1.25rem] h-5">
-                              {activeFiltersCount}
-                            </Badge>
-                          )}
-                        </Button>
-                      </DialogTrigger>
-                      <DialogContent className="sm:max-w-2xl aramco-card-bg">
-                        <DialogHeader>
-                          <DialogTitle className="text-white">Advanced Filters</DialogTitle>
-                          <DialogDescription className="text-white/80">
-                            Filter cash calls by various criteria
-                          </DialogDescription>
-                        </DialogHeader>
-                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                          <div>
-                            <Label className="text-white">Status</Label>
-                            <Select
-                              value={filters.status}
-                              onValueChange={(value) => setFilters({ ...filters, status: value })}
-                            >
-                              <SelectTrigger className="enhanced-select">
-                                <SelectValue />
-                              </SelectTrigger>
-                              <SelectContent className="bg-white border-gray-300">
-                                <SelectItem value="all">All Statuses</SelectItem>
-                                <SelectItem value="draft">Draft</SelectItem>
-                                <SelectItem value="under_review">Under Review</SelectItem>
-                                <SelectItem value="approved">Approved</SelectItem>
-                                <SelectItem value="paid">Paid</SelectItem>
-                                <SelectItem value="rejected">Rejected</SelectItem>
-                              </SelectContent>
-                            </Select>
-                          </div>
-
-                          <div>
-                            <Label className="text-white">Affiliate</Label>
-                            <Select
-                              value={filters.affiliate}
-                              onValueChange={(value) => setFilters({ ...filters, affiliate: value })}
-                            >
-                              <SelectTrigger className="enhanced-select">
-                                <SelectValue />
-                              </SelectTrigger>
-                              <SelectContent className="bg-white border-gray-300">
-                                <SelectItem value="all">All Affiliates</SelectItem>
-                                {affiliates.map((affiliate) => (
-                                  <SelectItem key={affiliate.id} value={affiliate.id}>
-                                    {affiliate.name} ({affiliate.company_code})
-                                  </SelectItem>
-                                ))}
-                              </SelectContent>
-                            </Select>
-                          </div>
-
-                          <div>
-                            <Label className="text-white">Approver</Label>
-                            <Select
-                              value={filters.approver}
-                              onValueChange={(value) => setFilters({ ...filters, approver: value })}
-                            >
-                              <SelectTrigger className="enhanced-select">
-                                <SelectValue />
-                              </SelectTrigger>
-                              <SelectContent className="bg-white border-gray-300">
-                                <SelectItem value="all">All Approvers</SelectItem>
-                                {users
-                                  .filter((u) => u.role !== "viewer")
-                                  .map((user) => (
-                                    <SelectItem key={user.id} value={user.id}>
-                                      {user.full_name || user.email}
-                                    </SelectItem>
-                                  ))}
-                              </SelectContent>
-                            </Select>
-                          </div>
-
-                          <div>
-                            <Label className="text-white">Date From</Label>
-                            <Input
-                              type="date"
-                              value={filters.dateFrom}
-                              onChange={(e) => setFilters({ ...filters, dateFrom: e.target.value })}
-                              className="enhanced-input"
-                            />
-                          </div>
-
-                          <div>
-                            <Label className="text-white">Date To</Label>
-                            <Input
-                              type="date"
-                              value={filters.dateTo}
-                              onChange={(e) => setFilters({ ...filters, dateTo: e.target.value })}
-                              className="enhanced-input"
-                            />
-                          </div>
-
-                          <div>
-                            <Label className="text-white">Min Amount ($)</Label>
-                            <Input
-                              type="number"
-                              step="0.01"
-                              value={filters.amountMin}
-                              onChange={(e) => setFilters({ ...filters, amountMin: e.target.value })}
-                              placeholder="0.00"
-                              className="enhanced-input"
-                            />
-                          </div>
-
-                          <div>
-                            <Label className="text-white">Max Amount ($)</Label>
-                            <Input
-                              type="number"
-                              step="0.01"
-                              value={filters.amountMax}
-                              onChange={(e) => setFilters({ ...filters, amountMax: e.target.value })}
-                              placeholder="999999.99"
-                              className="enhanced-input"
-                            />
-                          </div>
-                        </div>
-                        <div className="flex justify-between pt-4">
-                          <Button
-                            onClick={clearFilters}
-                            variant="outline"
-                            className="border-gray-400 text-gray-300 hover:bg-gray-700 bg-transparent"
-                          >
-                            <X className="h-4 w-4 mr-2" />
-                            Clear All
-                          </Button>
-                          <Button onClick={() => setIsFilterOpen(false)} className="aramco-button-primary text-white">
-                            Apply Filters
-                          </Button>
-                        </div>
-                      </DialogContent>
-                    </Dialog>
+                  <div className="flex-1">
+                    <AdvancedSearch
+                      filters={filters}
+                      onFiltersChange={setFilters}
+                      affiliates={affiliates.filter(affiliate => {
+                        // If user is affiliate, only show their own company
+                        if (userProfile?.role === 'affiliate') {
+                          return affiliate.id === userProfile.affiliate_company_id
+                        }
+                        // Admin and approver can see all affiliates
+                        return true
+                      })}
+                      users={users}
+                      cashCalls={cashCalls}
+                    />
                   </div>
 
                   <Dialog open={isNewCashCallOpen} onOpenChange={setIsNewCashCallOpen}>
@@ -698,34 +884,91 @@ export default function Dashboard() {
                       <DialogHeader>
                         <DialogTitle className="text-white">Create New Cash Call</DialogTitle>
                         <DialogDescription className="text-white/80">
-                          Add a new cash call request for an affiliate.
+                          {userProfile?.role === 'affiliate' 
+                            ? 'Add a new cash call request for your company.'
+                            : 'Add a new cash call request for an affiliate.'
+                          }
                         </DialogDescription>
                       </DialogHeader>
                       <div className="space-y-4">
-                        <div>
-                          <Label htmlFor="affiliateId" className="text-white font-medium mb-2 block">
-                            Affiliate *
-                          </Label>
-                          <Select
-                            value={newCashCall.affiliateId}
-                            onValueChange={(value) => setNewCashCall({ ...newCashCall, affiliateId: value })}
-                          >
-                            <SelectTrigger className="enhanced-select">
-                              <SelectValue placeholder="Select an affiliate" />
-                            </SelectTrigger>
-                            <SelectContent className="bg-white border-gray-300">
-                              {affiliates.map((affiliate) => (
-                                <SelectItem
-                                  key={affiliate.id}
-                                  value={affiliate.id}
-                                  className="text-gray-700 hover:bg-[#0033A0]/10"
-                                >
-                                  {affiliate.name} ({affiliate.company_code})
-                                </SelectItem>
-                              ))}
-                            </SelectContent>
-                          </Select>
-                        </div>
+                        {userProfile?.role === 'affiliate' ? (
+                          // For affiliate users, show their company as read-only
+                          <div>
+                                                         <Label htmlFor="affiliateId" className="text-white font-medium mb-2 block">
+                               Company
+                             </Label>
+                                                       <div className="p-3 bg-white/10 backdrop-blur-sm rounded-md border border-white/20 text-white">
+                             <div className="text-white font-medium">
+                               {(() => {
+                                 const affiliate = affiliates.find(aff => aff.id === userProfile.affiliate_company_id)
+                                 console.log('Debug - userProfile.affiliate_company_id:', userProfile.affiliate_company_id)
+                                 console.log('Debug - available affiliates:', affiliates.map(aff => ({ id: aff.id, name: aff.name })))
+                                 console.log('Debug - found affiliate:', affiliate)
+                                 
+                                 // If affiliate not found, try to determine from userProfile data
+                                 if (!affiliate && userProfile?.affiliate_company_id) {
+                                   // Check if it's a known affiliate ID pattern
+                                   if (userProfile.affiliate_company_id === 'cntxt-003') {
+                                     return 'CNTXT'
+                                   } else if (userProfile.affiliate_company_id === 'cyberani-001') {
+                                     return 'Cyberani'
+                                   } else if (userProfile.affiliate_company_id === 'nextera-002') {
+                                     return 'NextEra'
+                                   } else if (userProfile.affiliate_company_id === 'plantdigital-004') {
+                                     return 'Plant Digital'
+                                   }
+                                 }
+                                 
+                                 return affiliate?.name || 'Company not found'
+                               })()}
+                             </div>
+                             <div className="text-sm text-white/70">
+                               {(() => {
+                                 const affiliate = affiliates.find(aff => aff.id === userProfile.affiliate_company_id)
+                                 if (!affiliate && userProfile?.affiliate_company_id) {
+                                   // Fallback company codes
+                                   if (userProfile.affiliate_company_id === 'cntxt-003') {
+                                     return 'CNTXT-003'
+                                   } else if (userProfile.affiliate_company_id === 'cyberani-001') {
+                                     return 'CYBERANI-001'
+                                   } else if (userProfile.affiliate_company_id === 'nextera-002') {
+                                     return 'NEXTERA-002'
+                                   } else if (userProfile.affiliate_company_id === 'plantdigital-004') {
+                                     return 'PLANTDIGITAL-004'
+                                   }
+                                 }
+                                 return affiliate?.company_code || ''
+                               })()}
+                             </div>
+                           </div>
+                          </div>
+                        ) : (
+                          // For admin/approver users, show affiliate selection
+                          <div>
+                            <Label htmlFor="affiliateId" className="text-white font-medium mb-2 block">
+                              Affiliate *
+                            </Label>
+                            <Select
+                              value={newCashCall.affiliateId}
+                              onValueChange={(value) => setNewCashCall({ ...newCashCall, affiliateId: value })}
+                            >
+                              <SelectTrigger className="enhanced-select">
+                                <SelectValue placeholder="Select an affiliate" />
+                              </SelectTrigger>
+                              <SelectContent className="bg-white border-gray-300">
+                                {affiliates.map((affiliate) => (
+                                  <SelectItem
+                                    key={affiliate.id}
+                                    value={affiliate.id}
+                                    className="text-gray-700 hover:bg-[#0033A0]/10"
+                                  >
+                                    {affiliate.name} ({affiliate.company_code})
+                                  </SelectItem>
+                                ))}
+                              </SelectContent>
+                            </Select>
+                          </div>
+                        )}
 
                         <div>
                           <Label htmlFor="amountRequested" className="text-white font-medium mb-2 block">
@@ -798,12 +1041,46 @@ export default function Dashboard() {
               <CardHeader>
                 <div className="flex items-center justify-between">
                   <CardTitle className="text-[#0033A0] text-xl">Cash Call Records</CardTitle>
-                  <div className="text-sm text-gray-600">
-                    Showing {filteredCashCalls.length} of {cashCalls.length} records
-                    {activeFiltersCount > 0 && (
-                      <span className="ml-2 text-[#0033A0]">
-                        ({activeFiltersCount} filter{activeFiltersCount !== 1 ? "s" : ""} active)
-                      </span>
+                  <div className="flex items-center gap-4">
+                    <div className="text-sm text-gray-600">
+                      Showing {filteredCashCalls.length} of {cashCalls.length} records
+                      {activeFiltersCount > 0 && (
+                        <span className="ml-2 text-[#0033A0]">
+                          ({activeFiltersCount} filter{activeFiltersCount !== 1 ? "s" : ""} active)
+                        </span>
+                      )}
+                    </div>
+                    
+                    {/* Bulk Actions */}
+                    {selectedItems.size > 0 && (
+                      <div className="flex items-center gap-2">
+                        <span className="text-sm text-[#0033A0] font-medium">
+                          {selectedItems.size} selected
+                        </span>
+                        <Button
+                          size="sm"
+                          onClick={() => handleBulkAction('approve')}
+                          className="bg-[#00843D] hover:bg-[#84BD00] text-white"
+                        >
+                          Approve Selected
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={() => handleBulkAction('reject')}
+                          className="border-red-500 text-red-500 hover:bg-red-500/10"
+                        >
+                          Reject Selected
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={() => setSelectedItems(new Set())}
+                          className="border-gray-400 text-gray-600"
+                        >
+                          Clear Selection
+                        </Button>
+                      </div>
                     )}
                   </div>
                 </div>
@@ -813,6 +1090,16 @@ export default function Dashboard() {
                   <table className="w-full">
                     <thead>
                       <tr className="border-b border-gray-200">
+                        {userProfile?.role !== "viewer" && (
+                          <th className="text-left py-4 px-4 font-semibold text-[#0033A0] w-12">
+                            <input
+                              type="checkbox"
+                              checked={selectedItems.size > 0 && selectedItems.size === paginatedCashCalls.length}
+                              onChange={handleSelectAll}
+                              className="rounded border-[#0033A0] text-[#0033A0] focus:ring-[#0033A0]"
+                            />
+                          </th>
+                        )}
                         <th className="text-left py-4 px-4 font-semibold text-[#0033A0]">ID</th>
                         <th className="text-left py-4 px-4 font-semibold text-[#0033A0]">Affiliate Name</th>
                         <th className="text-left py-4 px-4 font-semibold text-[#0033A0]">Amount Requested</th>
@@ -822,12 +1109,22 @@ export default function Dashboard() {
                       </tr>
                     </thead>
                     <tbody>
-                      {filteredCashCalls.map((cashCall) => (
+                      {paginatedCashCalls.map((cashCall) => (
                         <tr
                           key={cashCall.id}
                           className="border-b border-gray-100 hover:bg-[#0033A0]/5 transition-colors cursor-pointer"
                           onClick={() => handleRowClick(cashCall.id)}
                         >
+                          {userProfile?.role !== "viewer" && (
+                            <td className="py-4 px-4" onClick={(e) => e.stopPropagation()}>
+                              <input
+                                type="checkbox"
+                                checked={selectedItems.has(cashCall.id)}
+                                onChange={() => handleSelectItem(cashCall.id)}
+                                className="rounded border-[#0033A0] text-[#0033A0] focus:ring-[#0033A0]"
+                              />
+                            </td>
+                          )}
                           <td className="py-4 px-4 font-semibold text-[#00A3E0]">{cashCall.call_number}</td>
                           <td className="py-4 px-4 text-gray-700 font-medium">
                             <button
@@ -920,6 +1217,52 @@ export default function Dashboard() {
                     </tbody>
                   </table>
                 </div>
+                {/* Pagination Controls */}
+                {totalPages > 1 && (
+                  <div className="flex items-center justify-between mt-6">
+                    <div className="text-sm text-gray-600">
+                      Showing {startIndex + 1} to {Math.min(endIndex, filteredCashCalls.length)} of {filteredCashCalls.length} results
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => handlePageChange(currentPage - 1)}
+                        disabled={currentPage === 1}
+                        className="border-[#0033A0] text-[#0033A0] hover:bg-[#0033A0]/10"
+                      >
+                        Previous
+                      </Button>
+                      <div className="flex items-center gap-1">
+                        {Array.from({ length: totalPages }, (_, i) => i + 1).map((page) => (
+                          <Button
+                            key={page}
+                            variant={currentPage === page ? "default" : "outline"}
+                            size="sm"
+                            onClick={() => handlePageChange(page)}
+                            className={
+                              currentPage === page
+                                ? "bg-[#0033A0] text-white"
+                                : "border-[#0033A0] text-[#0033A0] hover:bg-[#0033A0]/10"
+                            }
+                          >
+                            {page}
+                          </Button>
+                        ))}
+                      </div>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => handlePageChange(currentPage + 1)}
+                        disabled={currentPage === totalPages}
+                        className="border-[#0033A0] text-[#0033A0] hover:bg-[#0033A0]/10"
+                      >
+                        Next
+                      </Button>
+                    </div>
+                  </div>
+                )}
+
                 {filteredCashCalls.length === 0 && !isLoading && (
                   <div className="text-center py-12">
                     <div className="text-gray-500 mb-4">
@@ -954,9 +1297,7 @@ export default function Dashboard() {
             </Card>
           </TabsContent>
 
-          <TabsContent value="reports" className="space-y-6">
-                            <ReportingDashboard cashCalls={cashCalls} affiliates={affiliates} />
-          </TabsContent>
+
 
           <TabsContent value="affiliate" className="space-y-6">
             {selectedAffiliateId && (
@@ -978,5 +1319,13 @@ export default function Dashboard() {
         </Tabs>
       </div>
     </div>
+  )
+}
+
+export default function Dashboard() {
+  return (
+    <NotificationProvider>
+      <DashboardContent />
+    </NotificationProvider>
   )
 }

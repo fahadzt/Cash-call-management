@@ -62,6 +62,7 @@ export interface User {
   email: string
   full_name: string
   role: 'admin' | 'approver' | 'affiliate' | 'viewer'
+  affiliate_company_id?: string // Link to affiliate company for affiliate users
   department?: string
   position?: string
   phone?: string
@@ -213,7 +214,7 @@ export interface ChecklistItem {
 export interface AffiliateChecklist {
   id: string
   affiliate_id: string
-  cash_call_id: string
+  cash_call_id?: string // Optional link to cash call record
   template_id?: string
   status: 'not_started' | 'in_progress' | 'completed' | 'on_hold'
   created_by?: string
@@ -296,6 +297,9 @@ export async function signUp(email: string, password: string, userData: Partial<
       email: email,
       full_name: userData.full_name || '',
       role: userData.role || 'viewer',
+      affiliate_company_id: userData.affiliate_company_id || null,
+      position: userData.position || null,
+      phone: userData.phone || null,
       is_active: true,
       created_at: serverTimestamp() as FieldValue,
       updated_at: serverTimestamp() as FieldValue,
@@ -308,27 +312,14 @@ export async function signUp(email: string, password: string, userData: Partial<
 
     // Only add optional fields if they have values
     if (userData.department) {
-      (userDoc as any).department = userData.department
-    }
-    if (userData.position) {
-      (userDoc as any).position = userData.position
-    }
-    if (userData.phone) {
-      (userDoc as any).phone = userData.phone
+      userDoc.department = userData.department
     }
 
     await setDoc(doc(db, 'users', userCredential.user.uid), userDoc)
     
-    // Update Firebase Auth profile
-    if (userData.full_name) {
-      await updateProfile(userCredential.user, {
-        displayName: userData.full_name
-      })
-    }
-
     return userCredential
   } catch (error) {
-    console.error('Error signing up:', error)
+    console.error('Error in signUp:', error)
     throw error
   }
 }
@@ -438,6 +429,56 @@ export async function updateUserRole(userId: string, role: User['role']): Promis
     })
   } catch (error) {
     console.error('Error updating user role:', error)
+    throw error
+  }
+}
+
+export async function updateUser(userId: string, updates: Partial<User>): Promise<void> {
+  try {
+    const userRef = doc(db, 'users', userId)
+    
+    // Get current data for activity log
+    const currentDoc = await getDoc(userRef)
+    const oldValues = currentDoc.exists() ? currentDoc.data() : null
+    
+    await updateDoc(userRef, {
+      ...updates,
+      updated_at: serverTimestamp()
+    })
+
+    // Log activity
+    await logActivity({
+      action: 'user_updated',
+      entity_type: 'user',
+      entity_id: userId,
+      old_values: oldValues,
+      new_values: { ...oldValues, ...updates }
+    })
+  } catch (error) {
+    console.error('Error updating user:', error)
+    throw error
+  }
+}
+
+export async function deleteUser(userId: string): Promise<void> {
+  try {
+    const userRef = doc(db, 'users', userId)
+    
+    // Get current data for activity log
+    const currentDoc = await getDoc(userRef)
+    const oldValues = currentDoc.exists() ? currentDoc.data() : null
+    
+    await deleteDoc(userRef)
+
+    // Log activity
+    await logActivity({
+      action: 'user_deleted',
+      entity_type: 'user',
+      entity_id: userId,
+      old_values: oldValues
+    })
+  } catch (error) {
+    console.error('Error deleting user:', error)
     throw error
   }
 }
@@ -650,6 +691,14 @@ export async function getCashCall(id: string): Promise<CashCall | null> {
 
 export async function createCashCall(cashCallData: Omit<CashCall, 'id' | 'created_at' | 'updated_at'>): Promise<string> {
   try {
+    console.log('Debug - Creating cash call with data:', {
+      call_number: cashCallData.call_number,
+      affiliate_id: cashCallData.affiliate_id,
+      amount_requested: cashCallData.amount_requested,
+      created_by: cashCallData.created_by,
+      status: cashCallData.status
+    })
+
     const cashCallsRef = collection(db, 'cash_calls')
     const docRef = await addDoc(cashCallsRef, {
       ...cashCallData,
@@ -659,6 +708,8 @@ export async function createCashCall(cashCallData: Omit<CashCall, 'id' | 'create
       total_approved_amount: 0,
       remaining_amount: cashCallData.amount_requested
     })
+    
+    console.log('Debug - Cash call created successfully with ID:', docRef.id)
     
     // Log activity
     await logActivity({
@@ -1378,6 +1429,8 @@ export interface AffiliateChecklist {
   id: string
   affiliate_id: string
   affiliate_name: string
+  cash_call_id?: string // Link to cash call record
+  template_type?: 'CAPEX' | 'OPEX'
   groups: ChecklistGroup[]
   created_at: Date
   updated_at: Date
@@ -1391,7 +1444,180 @@ export interface StatusOption {
   created_at: Date
 }
 
-// Standardized checklist items with updated names
+// Available checklist items with CAPEX/OPEX applicability
+const availableChecklistItems = {
+  aramcoDigital: [
+    { 
+      itemNo: "1", 
+      documentList: "Developing Cash Call Package", 
+      status: "Not Started",
+      applicableTo: ["CAPEX", "OPEX"] // Applies to both
+    },
+    { 
+      itemNo: "2", 
+      documentList: "Cash Call Letter from AD CFO", 
+      status: "Not Started",
+      applicableTo: ["CAPEX", "OPEX"] // Applies to both
+    },
+    { 
+      itemNo: "3", 
+      documentList: "Active Bank Certificate", 
+      status: "Not Started",
+      applicableTo: ["CAPEX", "OPEX"] // Applies to both
+    },
+    { 
+      itemNo: "4", 
+      documentList: "Capital Investment Approval", 
+      status: "Not Started",
+      applicableTo: ["CAPEX"] // CAPEX only
+    },
+    { 
+      itemNo: "5", 
+      documentList: "Asset Acquisition Plan", 
+      status: "Not Started",
+      applicableTo: ["CAPEX"] // CAPEX only
+    },
+    { 
+      itemNo: "6", 
+      documentList: "Operational Budget Approval", 
+      status: "Not Started",
+      applicableTo: ["OPEX"] // OPEX only
+    },
+  ],
+  businessProponent: [
+    { 
+      itemNo: "1", 
+      documentList: "Budget Approval and Funding Authority Check", 
+      status: "Not Started",
+      applicableTo: ["CAPEX", "OPEX"] // Applies to both
+    },
+    { 
+      itemNo: "2", 
+      documentList: "Formation Document (CR, Bylaw etc.)", 
+      status: "Not Started",
+      applicableTo: ["CAPEX", "OPEX"] // Applies to both
+    },
+    { 
+      itemNo: "3", 
+      documentList: "Setting up MPS and Obtaining pre-MPS Clearance", 
+      status: "Not Started",
+      applicableTo: ["CAPEX", "OPEX"] // Applies to both
+    },
+    { 
+      itemNo: "4", 
+      documentList: "Creating Cash Call MPS Workflow", 
+      status: "Not Started",
+      applicableTo: ["CAPEX", "OPEX"] // Applies to both
+    },
+    { 
+      itemNo: "5", 
+      documentList: "Notifying SAO Treasury", 
+      status: "Not Started",
+      applicableTo: ["CAPEX", "OPEX"] // Applies to both
+    },
+    { 
+      itemNo: "6", 
+      documentList: "Capital Expenditure Authorization", 
+      status: "Not Started",
+      applicableTo: ["CAPEX"] // CAPEX only
+    },
+    { 
+      itemNo: "7", 
+      documentList: "Operational Expense Authorization", 
+      status: "Not Started",
+      applicableTo: ["OPEX"] // OPEX only
+    },
+  ],
+  secondTieredAffiliate: [
+    { 
+      itemNo: "1", 
+      documentList: "Cash Call Letter from CFO/CEO to Capital Owner", 
+      status: "Not Started",
+      applicableTo: ["CAPEX", "OPEX"] // Applies to both
+    },
+    { 
+      itemNo: "2", 
+      documentList: "Approved Business Plan", 
+      status: "Not Started",
+      applicableTo: ["CAPEX", "OPEX"] // Applies to both
+    },
+    { 
+      itemNo: "3", 
+      documentList: "Proof of Budget Approval (e.g. Board Minutes)", 
+      status: "Not Started",
+      applicableTo: ["CAPEX", "OPEX"] // Applies to both
+    },
+    { 
+      itemNo: "4", 
+      documentList: "Active Bank Certificate", 
+      status: "Not Started",
+      applicableTo: ["CAPEX", "OPEX"] // Applies to both
+    },
+    { 
+      itemNo: "5", 
+      documentList: "Shareholders Resolution Signed by SH-Reps", 
+      status: "Not Started",
+      applicableTo: ["CAPEX", "OPEX"] // Applies to both
+    },
+    { 
+      itemNo: "6", 
+      documentList: "Cash Flow Forecast", 
+      status: "Not Started",
+      applicableTo: ["CAPEX", "OPEX"] // Applies to both
+    },
+    { 
+      itemNo: "7", 
+      documentList: "Utilization of Previous Cash Call", 
+      status: "Not Started",
+      applicableTo: ["CAPEX", "OPEX"] // Applies to both
+    },
+    { 
+      itemNo: "8", 
+      documentList: "Asset Valuation Report", 
+      status: "Not Started",
+      applicableTo: ["CAPEX"] // CAPEX only
+    },
+    { 
+      itemNo: "9", 
+      documentList: "Capital Investment Timeline", 
+      status: "Not Started",
+      applicableTo: ["CAPEX"] // CAPEX only
+    },
+    { 
+      itemNo: "10", 
+      documentList: "Operational Expense Breakdown", 
+      status: "Not Started",
+      applicableTo: ["OPEX"] // OPEX only
+    },
+    { 
+      itemNo: "11", 
+      documentList: "Additional Documents (Case By Case) Requested By GF&CD", 
+      status: "Not Started",
+      applicableTo: ["CAPEX", "OPEX"] // Applies to both
+    },
+  ],
+}
+
+// Legacy templates for backward compatibility
+const checklistTemplates = {
+  CAPEX: {
+    aramcoDigital: availableChecklistItems.aramcoDigital.filter(item => item.applicableTo.includes('CAPEX')),
+    businessProponent: availableChecklistItems.businessProponent.filter(item => item.applicableTo.includes('CAPEX')),
+    secondTieredAffiliate: availableChecklistItems.secondTieredAffiliate.filter(item => item.applicableTo.includes('CAPEX')),
+  },
+  OPEX: {
+    aramcoDigital: availableChecklistItems.aramcoDigital.filter(item => item.applicableTo.includes('OPEX')),
+    businessProponent: availableChecklistItems.businessProponent.filter(item => item.applicableTo.includes('OPEX')),
+    secondTieredAffiliate: availableChecklistItems.secondTieredAffiliate.filter(item => item.applicableTo.includes('OPEX')),
+  },
+}
+
+// Export available items for the UI
+export function getAvailableChecklistItems() {
+  return availableChecklistItems
+}
+
+// Standardized checklist items with updated names (for backward compatibility)
 const standardChecklistItems = {
   aramcoDigital: [
     { itemNo: "1", documentList: "Developing Cash Call Package", status: "Not Started" },
@@ -1493,45 +1719,59 @@ export async function getChecklistByAffiliate(affiliateId: string): Promise<Affi
   }
 }
 
-export async function createAffiliateChecklist(affiliateId: string, affiliateName: string): Promise<AffiliateChecklist> {
+export async function createAffiliateChecklist(
+  affiliateId: string, 
+  affiliateName: string, 
+  selectedItems: {
+    aramcoDigital: string[],
+    businessProponent: string[],
+    secondTieredAffiliate: string[]
+  },
+  templateType: 'CAPEX' | 'OPEX',
+  cashCallId?: string // Optional cash call ID to link the checklist
+): Promise<AffiliateChecklist> {
   try {
+    // Check if we're in a browser environment and have access to Firebase
+    if (typeof window === 'undefined') {
+      throw new Error('Firebase functions can only be called from the browser')
+    }
+
     const timestamp = new Date()
     const uniqueId = Date.now().toString()
+
+    // Filter items based on selection
+    const getSelectedItemsForGroup = (groupKey: keyof typeof availableChecklistItems, selectedItemNos: string[]) => {
+      return availableChecklistItems[groupKey]
+        .filter(item => selectedItemNos.includes(item.itemNo))
+        .map((item, index) => ({
+          id: `item-${groupKey}-${uniqueId}-${index + 1}`,
+          itemNo: item.itemNo,
+          documentList: item.documentList,
+          status: item.status,
+          created_at: timestamp,
+          updated_at: timestamp,
+        }))
+    }
 
     const groupsToCreate: ChecklistGroup[] = [
       {
         id: `group-aramco-${uniqueId}`,
         name: "Aramco Digital Company",
-        items: standardChecklistItems.aramcoDigital.map((item, index) => ({
-          id: `item-aramco-${uniqueId}-${index + 1}`,
-          ...item,
-          created_at: timestamp,
-          updated_at: timestamp,
-        })),
+        items: getSelectedItemsForGroup('aramcoDigital', selectedItems.aramcoDigital),
         created_at: timestamp,
         updated_at: timestamp,
       },
       {
         id: `group-business-${uniqueId}`,
         name: "Business Proponent - T&I Affiliate Affairs",
-        items: standardChecklistItems.businessProponent.map((item, index) => ({
-          id: `item-business-${uniqueId}-${index + 1}`,
-          ...item,
-          created_at: timestamp,
-          updated_at: timestamp,
-        })),
+        items: getSelectedItemsForGroup('businessProponent', selectedItems.businessProponent),
         created_at: timestamp,
         updated_at: timestamp,
       },
       {
         id: `group-affiliate-${uniqueId}`,
         name: "2nd Tiered Affiliate",
-        items: standardChecklistItems.secondTieredAffiliate.map((item, index) => ({
-          id: `item-affiliate-${uniqueId}-${index + 1}`,
-          ...item,
-          created_at: timestamp,
-          updated_at: timestamp,
-        })),
+        items: getSelectedItemsForGroup('secondTieredAffiliate', selectedItems.secondTieredAffiliate),
         created_at: timestamp,
         updated_at: timestamp,
       },
@@ -1540,6 +1780,8 @@ export async function createAffiliateChecklist(affiliateId: string, affiliateNam
     const newChecklist: Omit<AffiliateChecklist, 'id'> = {
       affiliate_id: affiliateId,
       affiliate_name: affiliateName,
+      cash_call_id: cashCallId, // Link to cash call if provided
+      template_type: templateType,
       groups: groupsToCreate,
       created_at: timestamp,
       updated_at: timestamp,
@@ -1547,13 +1789,17 @@ export async function createAffiliateChecklist(affiliateId: string, affiliateNam
 
     const docRef = await addDoc(collection(db, 'affiliate_checklists'), newChecklist)
     
-    // Log activity
-    await logActivity({
-      action: 'checklist_created',
-      entity_type: 'affiliate_checklist',
-      entity_id: docRef.id,
-      new_values: { affiliate_id: affiliateId, affiliate_name: affiliateName }
-    })
+    // Log activity (only if we're in production or have proper auth)
+    try {
+      await logActivity({
+        action: 'checklist_created',
+        entity_type: 'affiliate_checklist',
+        entity_id: docRef.id,
+        new_values: { affiliate_id: affiliateId, affiliate_name: affiliateName }
+      })
+    } catch (error) {
+      console.warn('Could not log activity (this is normal in development):', error)
+    }
     
     return {
       id: docRef.id,
@@ -1902,5 +2148,167 @@ export async function standardizeExistingChecklists(): Promise<void> {
   } catch (error) {
     console.error('Error standardizing existing checklists:', error)
     throw error
+  }
+} 
+
+// Role-based access control functions
+export async function getCashCallsForUser(userId: string, userRole: string, affiliateCompanyId?: string) {
+  try {
+    console.log('Debug - getCashCallsForUser called:', {
+      userId,
+      userRole,
+      affiliateCompanyId
+    })
+
+    if (userRole === 'admin' || userRole === 'approver') {
+      // Admins and approvers can see all cash calls
+      const allCashCalls = await getCashCalls()
+      console.log('Debug - Admin/Approver: returning all cash calls:', allCashCalls.length)
+      return allCashCalls
+    } else if (userRole === 'affiliate') {
+      // Affiliate users can only see their company's cash calls
+      if (!affiliateCompanyId) {
+        console.warn('Affiliate user has no affiliate_company_id assigned')
+        return []
+      }
+      
+      const affiliates = await getAffiliates()
+      const userAffiliate = affiliates.find(a => a.id === affiliateCompanyId)
+      
+      console.log('Debug - Affiliate filtering:', {
+        userAffiliateId: affiliateCompanyId,
+        userAffiliateFound: !!userAffiliate,
+        userAffiliateName: userAffiliate?.name,
+        availableAffiliates: affiliates.map(a => ({ id: a.id, name: a.name }))
+      })
+      
+      if (!userAffiliate) {
+        console.warn(`Affiliate company with ID ${affiliateCompanyId} not found. Available affiliates:`, affiliates.map(a => ({ id: a.id, name: a.name })))
+        // Return empty array instead of throwing error to prevent app crash
+        return []
+      }
+
+      const cashCalls = await getCashCalls()
+      console.log('Debug - All cash calls:', cashCalls.map(cc => ({ id: cc.id, affiliate_id: cc.affiliate_id, call_number: cc.call_number, created_by: cc.created_by })))
+      
+      // Filter cash calls to only show the affiliate's own company's cash calls
+      const filteredCashCalls = cashCalls.filter(cashCall => cashCall.affiliate_id === affiliateCompanyId)
+      console.log('Debug - Filtered cash calls for affiliate:', {
+        totalCashCalls: cashCalls.length,
+        filteredCount: filteredCashCalls.length,
+        affiliateId: affiliateCompanyId,
+        userAffiliateId: affiliateCompanyId,
+        matchingCashCalls: filteredCashCalls.map(cc => ({ id: cc.id, call_number: cc.call_number, created_by: cc.created_by })),
+        nonMatchingCashCalls: cashCalls.filter(cc => cc.affiliate_id !== affiliateCompanyId).map(cc => ({ id: cc.id, call_number: cc.call_number, affiliate_id: cc.affiliate_id, created_by: cc.created_by }))
+      })
+      return filteredCashCalls
+    } else {
+      // Viewers can see all cash calls (read-only)
+      const allCashCalls = await getCashCalls()
+      console.log('Debug - Viewer: returning all cash calls:', allCashCalls.length)
+      return allCashCalls
+    }
+  } catch (error) {
+    console.error('Error getting cash calls for user:', error)
+    throw error
+  }
+}
+
+export async function canUserAccessCashCall(userId: string, userRole: string, affiliateCompanyId: string | undefined, cashCallId: string) {
+  try {
+    if (userRole === 'admin' || userRole === 'approver') {
+      return true // Admins and approvers can access all cash calls
+    }
+
+    if (userRole === 'affiliate' && affiliateCompanyId) {
+      // Get the cash call to check if it belongs to the user's affiliate company
+      const cashCalls = await getCashCalls()
+      const cashCall = cashCalls.find(cc => cc.id === cashCallId)
+      return cashCall?.affiliate_id === affiliateCompanyId
+    }
+
+    return false
+  } catch (error) {
+    console.error('Error checking cash call access:', error)
+    return false
+  }
+}
+
+export async function canUserModifyCashCall(userId: string, userRole: string, affiliateCompanyId: string | undefined, cashCallId: string) {
+  try {
+    if (userRole === 'admin' || userRole === 'approver') {
+      return true // Admins and approvers can modify all cash calls
+    }
+
+    if (userRole === 'affiliate' && affiliateCompanyId) {
+      // Affiliate users can only modify their own company's cash calls
+      const cashCalls = await getCashCalls()
+      const cashCall = cashCalls.find(cc => cc.id === cashCallId)
+      return cashCall?.affiliate_id === affiliateCompanyId && cashCall?.created_by === userId
+    }
+
+    return false
+  } catch (error) {
+    console.error('Error checking cash call modification access:', error)
+    return false
+  }
+}
+
+export async function getChecklistsForUser(userId: string, userRole: string, affiliateCompanyId?: string) {
+  try {
+    if (userRole === 'admin' || userRole === 'approver') {
+      // Admins and approvers can see all checklists
+      return await getAllChecklists()
+    } else if (userRole === 'affiliate' && affiliateCompanyId) {
+      // Affiliate users can only see their company's checklists
+      const checklists = await getAllChecklists()
+      return checklists.filter(checklist => checklist.affiliate_id === affiliateCompanyId)
+    } else {
+      // Viewers can see all checklists (read-only)
+      return await getAllChecklists()
+    }
+  } catch (error) {
+    console.error('Error getting checklists for user:', error)
+    throw error
+  }
+}
+
+export async function canUserAccessChecklist(userId: string, userRole: string, affiliateCompanyId: string | undefined, checklistId: string) {
+  try {
+    if (userRole === 'admin' || userRole === 'approver') {
+      return true // Admins and approvers can access all checklists
+    }
+
+    if (userRole === 'affiliate' && affiliateCompanyId) {
+      // Get the checklist to check if it belongs to the user's affiliate company
+      const checklists = await getAllChecklists()
+      const checklist = checklists.find(cl => cl.id === checklistId)
+      return checklist?.affiliate_id === affiliateCompanyId
+    }
+
+    return false
+  } catch (error) {
+    console.error('Error checking checklist access:', error)
+    return false
+  }
+}
+
+export async function canUserModifyChecklist(userId: string, userRole: string, affiliateCompanyId: string | undefined, checklistId: string) {
+  try {
+    if (userRole === 'admin' || userRole === 'approver') {
+      return true // Admins and approvers can modify all checklists
+    }
+
+    if (userRole === 'affiliate' && affiliateCompanyId) {
+      // Affiliate users can only modify their own company's checklists
+      const checklists = await getAllChecklists()
+      const checklist = checklists.find(cl => cl.id === checklistId)
+      return checklist?.affiliate_id === affiliateCompanyId
+    }
+
+    return false
+  } catch (error) {
+    console.error('Error checking checklist modification access:', error)
+    return false
   }
 } 

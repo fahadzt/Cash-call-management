@@ -1,9 +1,15 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    // Allow all operations for development (emulator)
-    // In production, you should use the more restrictive rules below
+    // Development rules - allow all operations for authenticated users
+    // This is more permissive for development purposes
     
+    // Allow all operations for authenticated users
+    match /{document=**} {
+      allow read, write: if request.auth != null;
+    }
+    
+    // Specific collection rules for better organization
     // Users collection
     match /users/{userId} {
       allow read, write: if request.auth != null;
@@ -66,6 +72,11 @@ service cloud.firestore {
     
     // Cash call approvals collection
     match /cash_call_approvals/{approvalId} {
+      allow read, write: if request.auth != null;
+    }
+    
+    // Status options collection
+    match /status_options/{optionId} {
       allow read, write: if request.auth != null;
     }
   }

@@ -293,49 +293,64 @@ INSERT INTO public.affiliates (
     risk_level
 ) VALUES 
 (
-    'TechInnovate Solutions',
-    'TIS-001',
-    'TechInnovate Solutions Ltd.',
-    'contact@techinnovate.com',
-    '+1-555-0123',
-    '123 Innovation Drive, Tech City, TC 12345',
-    'United States',
-    'Tech City',
-    'https://techinnovate.com',
-    'Technology Partnership',
+    'Cyberani',
+    'CYBERANI-001',
+    'Cyberani Digital Solutions',
+    'contact@cyberani.com',
+    '+966-11-123-4567',
+    'King Fahd Road, Riyadh, Saudi Arabia',
+    'Saudi Arabia',
+    'Riyadh',
+    'https://cyberani.com',
+    'Cybersecurity and Digital Innovation',
     '2023-01-15',
     'A+',
     'low'
 ),
 (
-    'GreenEnergy Partners',
-    'GEP-002',
-    'GreenEnergy Partners LLC',
-    'info@greenenergy.com',
-    '+1-555-0456',
-    '456 Renewable Way, Green City, GC 67890',
-    'United States',
-    'Green City',
-    'https://greenenergy.com',
-    'Energy Partnership',
+    'NextEra',
+    'NEXTERA-002',
+    'NextEra Energy Solutions',
+    'info@nextera.com',
+    '+966-11-234-5678',
+    'King Abdullah Road, Jeddah, Saudi Arabia',
+    'Saudi Arabia',
+    'Jeddah',
+    'https://nextera.com',
+    'Next Generation Energy Solutions',
     '2023-03-20',
     'A',
     'medium'
 ),
 (
-    'Digital Dynamics Corp',
-    'DDC-003',
-    'Digital Dynamics Corporation',
-    'hello@digitaldynamics.com',
-    '+1-555-0789',
-    '789 Digital Boulevard, Cyber City, CC 11111',
-    'United States',
-    'Cyber City',
-    'https://digitaldynamics.com',
-    'Digital Transformation',
+    'CNTXT',
+    'CNTXT-003',
+    'CNTXT Digital Transformation',
+    'hello@cntxt.com',
+    '+966-11-345-6789',
+    'Olaya Street, Riyadh, Saudi Arabia',
+    'Saudi Arabia',
+    'Riyadh',
+    'https://cntxt.com',
+    'Digital Transformation Consulting',
     '2023-06-10',
     'A-',
     'low'
+),
+(
+    'Plant Digital',
+    'PLANTDIGITAL-004',
+    'Plant Digital Solutions',
+    'contact@plantdigital.com',
+    '+966-11-456-7890',
+    'Industrial City, Dammam, Saudi Arabia',
+    'Saudi Arabia',
+    'Dammam',
+    'https://plantdigital.com',
+    'Plant Operations and Digital Solutions',
+    '2023-09-15',
+    'A',
+    'medium'
 )
 ON CONFLICT (company_code) DO NOTHING;
 
@@ -346,17 +361,19 @@ ON CONFLICT (company_code) DO NOTHING;
 -- Get affiliate IDs for reference
 DO $$
 DECLARE
-    tis_id UUID;
-    gep_id UUID;
-    ddc_id UUID;
+    cyberani_id UUID;
+    nextera_id UUID;
+    cntxt_id UUID;
+    plantdigital_id UUID;
 BEGIN
     -- Get affiliate IDs
-    SELECT id INTO tis_id FROM public.affiliates WHERE company_code = 'TIS-001';
-    SELECT id INTO gep_id FROM public.affiliates WHERE company_code = 'GEP-002';
-    SELECT id INTO ddc_id FROM public.affiliates WHERE company_code = 'DDC-003';
+    SELECT id INTO cyberani_id FROM public.affiliates WHERE company_code = 'CYBERANI-001';
+    SELECT id INTO nextera_id FROM public.affiliates WHERE company_code = 'NEXTERA-002';
+    SELECT id INTO cntxt_id FROM public.affiliates WHERE company_code = 'CNTXT-003';
+    SELECT id INTO plantdigital_id FROM public.affiliates WHERE company_code = 'PLANTDIGITAL-004';
 
     -- Insert sample cash calls if affiliates exist
-    IF tis_id IS NOT NULL THEN
+    IF cyberani_id IS NOT NULL THEN
         INSERT INTO public.cash_calls (
             call_number,
             title,
@@ -373,22 +390,22 @@ BEGIN
             created_by
         ) VALUES (
             'CC-2024-001',
-            'Digital Transformation Infrastructure Investment',
-            tis_id,
+            'Cybersecurity Infrastructure Investment',
+            cyberani_id,
             2500000.00,
             'under_review',
             'high',
             'Technology Investment',
-            'Investment in digital infrastructure and cloud migration services',
-            'USD',
+            'Investment in cybersecurity infrastructure and digital innovation services',
+            'SAR',
             'Net 30',
-            ARRAY['digital-transformation', 'infrastructure', 'cloud'],
+            ARRAY['cybersecurity', 'infrastructure', 'digital-innovation'],
             '2024-03-15',
             (SELECT id FROM auth.users LIMIT 1)
         ) ON CONFLICT DO NOTHING;
     END IF;
 
-    IF gep_id IS NOT NULL THEN
+    IF nextera_id IS NOT NULL THEN
         INSERT INTO public.cash_calls (
             call_number,
             title,
@@ -405,22 +422,22 @@ BEGIN
             created_by
         ) VALUES (
             'CC-2024-002',
-            'Renewable Energy Project Funding',
-            gep_id,
+            'Next Generation Energy Solutions Project',
+            nextera_id,
             5000000.00,
             'approved',
             'urgent',
             'Energy Investment',
-            'Funding for solar energy project development and implementation',
-            'USD',
+            'Funding for next generation energy solutions and infrastructure development',
+            'SAR',
             'Net 45',
-            ARRAY['renewable-energy', 'solar', 'sustainability'],
+            ARRAY['energy-solutions', 'infrastructure', 'sustainability'],
             '2024-04-20',
             (SELECT id FROM auth.users LIMIT 1)
         ) ON CONFLICT DO NOTHING;
     END IF;
 
-    IF ddc_id IS NOT NULL THEN
+    IF cntxt_id IS NOT NULL THEN
         INSERT INTO public.cash_calls (
             call_number,
             title,
@@ -437,16 +454,16 @@ BEGIN
             created_by
         ) VALUES (
             'CC-2024-003',
-            'AI and Machine Learning Platform Development',
-            ddc_id,
+            'Digital Transformation Consulting Project',
+            cntxt_id,
             1800000.00,
             'draft',
             'medium',
-            'AI Development',
-            'Development of AI and ML platform for predictive analytics',
-            'USD',
+            'Digital Transformation',
+            'Digital transformation consulting and implementation services',
+            'SAR',
             'Net 30',
-            ARRAY['ai', 'machine-learning', 'analytics'],
+            ARRAY['digital-transformation', 'consulting', 'implementation'],
             '2024-05-10',
             (SELECT id FROM auth.users LIMIT 1)
         ) ON CONFLICT DO NOTHING;

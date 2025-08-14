@@ -42,6 +42,8 @@ try {
 export const analytics = isSupported().then(yes => yes ? getAnalytics(app) : null)
 
 // Connect to emulators in development
+// WARNING: Firebase emulators use ephemeral storage - data is lost when emulator restarts
+// Set FIREBASE_USE_EMULATOR=true only for testing, not for persistent development
 const useEmulator = process.env.NODE_ENV === 'development' && process.env.FIREBASE_USE_EMULATOR === 'true'
 
 if (useEmulator) {
@@ -58,7 +60,8 @@ if (useEmulator) {
       connectAuthEmulator(auth, `http://${emulatorHost}:${authPort}`)
       connectStorageEmulator(storage, emulatorHost, parseInt(storagePort.toString()))
       connectFunctionsEmulator(functions, emulatorHost, parseInt(functionsPort.toString()))
-      console.log('✅ Connected to Firebase emulators')
+      console.log('⚠️  Connected to Firebase emulators - DATA WILL BE LOST ON RESTART')
+      console.log('💡 To use persistent data, set FIREBASE_USE_EMULATOR=false or remove the environment variable')
     } catch (error) {
       // Emulators already connected or not available
       console.log('Firebase emulators already connected or not available:', error.message)
@@ -67,7 +70,7 @@ if (useEmulator) {
     console.error('Error connecting to Firebase emulators:', error)
   }
 } else {
-  console.log('🚀 Using Firebase production services')
+  console.log('🚀 Using Firebase production services - Data will persist')
 }
 
 export { db, auth, storage, functions }
