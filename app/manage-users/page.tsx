@@ -3,11 +3,13 @@
 import { useState, useEffect } from 'react'
 import { useAuth } from '@/lib/firebase-auth-context'
 import { getUsers, getAffiliates, updateUser, deleteUser } from '@/lib/firebase-database'
+import { AccountRequestsManager } from '@/components/account-requests-manager'
 
 export default function ManageUsers() {
   const { user, userProfile } = useAuth()
   const [users, setUsers] = useState<any[]>([])
   const [affiliates, setAffiliates] = useState<any[]>([])
+  const [accountRequests, setAccountRequests] = useState<any[]>([])
   const [loading, setLoading] = useState(false)
   const [deleting, setDeleting] = useState<string | null>(null)
   const [updating, setUpdating] = useState<string | null>(null)
@@ -21,6 +23,7 @@ export default function ManageUsers() {
     affiliate: 'all',
     search: ''
   })
+  const [showRequests, setShowRequests] = useState(false)
 
   useEffect(() => {
     const loadData = async () => {
@@ -41,13 +44,15 @@ export default function ManageUsers() {
 
         console.log('=== LOADING USERS FOR MANAGEMENT ===')
         
-        const [usersData, affiliatesData] = await Promise.all([
+        const [usersData, affiliatesData, requestsData] = await Promise.all([
           getUsers(),
-          getAffiliates()
+          getAffiliates(),
+          fetch('/api/account-requests').then(res => res.json()).then(data => data.requests || [])
         ])
         
         setUsers(usersData)
         setAffiliates(affiliatesData)
+        setAccountRequests(requestsData)
         
         console.log('All Users:', usersData.map(u => ({ 
           email: u.email, 
@@ -133,6 +138,106 @@ export default function ManageUsers() {
     setEditForm({})
   }
 
+  // Account Request Management Functions
+  const handleApproveRequest = async (requestId: string, approvalData: any) => {
+    try {
+      setError("")
+      setSuccess("")
+
+      // Create user account with Firebase Auth
+      const response = await fetch('/api/users/create', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          requestId,
+          ...approvalData
+        }),
+      })
+
+      if (!response.ok) {
+        const errorData = await response.json()
+        throw new Error(errorData.error || 'Failed to create account')
+      }
+
+      setSuccess(`✅ Account created successfully for ${approvalData.email || 'user'}!`)
+      
+      // Reload data
+      const [usersData, requestsData] = await Promise.all([
+        getUsers(),
+        fetch('/api/account-requests').then(res => res.json()).then(data => data.requests || [])
+      ])
+      
+      setUsers(usersData)
+      setAccountRequests(requestsData)
+
+    } catch (err) {
+      console.error('Error creating account:', err)
+      setError(err instanceof Error ? err.message : 'Failed to create account')
+    }
+  }
+
+  const handleRejectRequest = async (requestId: string, rejectionData: any) => {
+    try {
+      setError("")
+      setSuccess("")
+
+      const response = await fetch(`/api/account-requests/${requestId}/reject`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(rejectionData),
+      })
+
+      if (!response.ok) {
+        const errorData = await response.json()
+        throw new Error(errorData.error || 'Failed to reject request')
+      }
+
+      setSuccess(`✅ Account request rejected successfully!`)
+      
+      // Reload requests
+      const requestsData = await fetch('/api/account-requests').then(res => res.json()).then(data => data.requests || [])
+      setAccountRequests(requestsData)
+
+    } catch (err) {
+      console.error('Error rejecting request:', err)
+      setError(err instanceof Error ? err.message : 'Failed to reject request')
+    }
+  }
+
+  const handleRequestMoreInfo = async (requestId: string, message: string) => {
+    try {
+      setError("")
+      setSuccess("")
+
+      const response = await fetch(`/api/account-requests/${requestId}/request-info`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ message }),
+      })
+
+      if (!response.ok) {
+        const errorData = await response.json()
+        throw new Error(errorData.error || 'Failed to request more info')
+      }
+
+      setSuccess(`✅ Information request sent successfully!`)
+      
+      // Reload requests
+      const requestsData = await fetch('/api/account-requests').then(res => res.json()).then(data => data.requests || [])
+      setAccountRequests(requestsData)
+
+    } catch (err) {
+      console.error('Error requesting more info:', err)
+      setError(err instanceof Error ? err.message : 'Failed to request more info')
+    }
+  }
+
   // Filter users based on current filters
   const filteredUsers = users.filter(user => {
     if (filters.role !== 'all' && user.role !== filters.role) return false
@@ -181,7 +286,55 @@ export default function ManageUsers() {
   return (
     <div className="min-h-screen bg-gray-50 p-8">
       <div className="max-w-6xl mx-auto">
-        <h1 className="text-3xl font-bold mb-8">Manage Users</h1>
+        <div className="flex items-center gap-4 mb-6">
+          <button
+            onClick={() => window.history.back()}
+            className="flex items-center gap-2 px-4 py-2 text-sm font-medium text-gray-600 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-blue-500"
+          >
+            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
+            </svg>
+            Back
+          </button>
+          <h1 className="text-3xl font-bold">User Management</h1>
+        </div>
+
+        {/* Tab Navigation */}
+        <div className="flex space-x-1 mb-6 bg-white rounded-lg p-1 shadow-sm">
+          <button
+            onClick={() => setShowRequests(false)}
+            className={`px-4 py-2 rounded-lg font-medium transition-colors ${
+              !showRequests 
+                ? 'bg-blue-600 text-white shadow-sm' 
+                : 'text-gray-600 hover:text-gray-900 hover:bg-gray-100'
+            }`}
+          >
+            Manage Users ({users.length})
+          </button>
+          <button
+            onClick={() => setShowRequests(true)}
+            className={`px-4 py-2 rounded-lg font-medium transition-colors ${
+              showRequests 
+                ? 'bg-blue-600 text-white shadow-sm' 
+                : 'text-gray-800 hover:text-gray-900 hover:bg-gray-100'
+            }`}
+          >
+            Account Requests ({accountRequests.filter(r => r.status === 'pending').length} pending)
+          </button>
+        </div>
+
+        {/* Conditional Content */}
+        {showRequests ? (
+          <AccountRequestsManager
+            requests={accountRequests}
+            affiliates={affiliates}
+            onApprove={handleApproveRequest}
+            onReject={handleRejectRequest}
+            onRequestMoreInfo={handleRequestMoreInfo}
+          />
+        ) : (
+          <>
+            <h1 className="text-3xl font-bold mb-8">Manage Users</h1>
         
         {/* Summary */}
         <div className="bg-white rounded-lg p-6 shadow-sm mb-6">
@@ -469,6 +622,8 @@ export default function ManageUsers() {
             </div>
           )}
         </div>
+          </>
+        )}
       </div>
     </div>
   )

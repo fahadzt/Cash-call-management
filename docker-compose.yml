@@ -1,0 +1,161 @@
+version: '3.8'
+
+services:
+  # API Gateway
+  gateway:
+    build:
+      context: ./gateway
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+      - JWT_SECRET=your-secret-key-here
+    depends_on:
+      - auth-service
+      - user-service
+      - dashboard-service
+      - cash-call-service
+      - affiliate-service
+      - document-service
+      - notification-service
+      - reporting-service
+    networks:
+      - cash-call-network
+
+  # Core Services
+  auth-service:
+    build:
+      context: ./core/auth-service
+      dockerfile: Dockerfile
+    ports:
+      - "3001:3001"
+    environment:
+      - NODE_ENV=production
+      - PORT=3001
+    networks:
+      - cash-call-network
+
+  user-service:
+    build:
+      context: ./core/user-service
+      dockerfile: Dockerfile
+    ports:
+      - "3002:3002"
+    environment:
+      - NODE_ENV=production
+      - PORT=3002
+    networks:
+      - cash-call-network
+
+  # Feature Services
+  dashboard-service:
+    build:
+      context: ./features/dashboard-service
+      dockerfile: Dockerfile
+    ports:
+      - "3003:3003"
+    environment:
+      - NODE_ENV=production
+      - PORT=3003
+    networks:
+      - cash-call-network
+
+  cash-call-service:
+    build:
+      context: ./features/cash-call-service
+      dockerfile: Dockerfile
+    ports:
+      - "3004:3004"
+    environment:
+      - NODE_ENV=production
+      - PORT=3004
+    networks:
+      - cash-call-network
+
+  affiliate-service:
+    build:
+      context: ./features/affiliate-service
+      dockerfile: Dockerfile
+    ports:
+      - "3005:3005"
+    environment:
+      - NODE_ENV=production
+      - PORT=3005
+    networks:
+      - cash-call-network
+
+  document-service:
+    build:
+      context: ./features/document-service
+      dockerfile: Dockerfile
+    ports:
+      - "3006:3006"
+    environment:
+      - NODE_ENV=production
+      - PORT=3006
+    networks:
+      - cash-call-network
+
+  notification-service:
+    build:
+      context: ./features/notification-service
+      dockerfile: Dockerfile
+    ports:
+      - "3007:3007"
+    environment:
+      - NODE_ENV=production
+      - PORT=3007
+    networks:
+      - cash-call-network
+
+  reporting-service:
+    build:
+      context: ./features/reporting-service
+      dockerfile: Dockerfile
+    ports:
+      - "3008:3008"
+    environment:
+      - NODE_ENV=production
+      - PORT=3008
+    networks:
+      - cash-call-network
+
+  # Monitoring & Health Checks
+  health-checker:
+    image: curlimages/curl:latest
+    command: >
+      sh -c "
+        while true; do
+          echo 'Checking service health...'
+          curl -f http://gateway:3000/health || echo 'Gateway health check failed'
+          curl -f http://auth-service:3001/health || echo 'Auth service health check failed'
+          curl -f http://user-service:3002/health || echo 'User service health check failed'
+          curl -f http://dashboard-service:3003/health || echo 'Dashboard service health check failed'
+          curl -f http://cash-call-service:3004/health || echo 'Cash call service health check failed'
+          curl -f http://affiliate-service:3005/health || echo 'Affiliate service health check failed'
+          curl -f http://document-service:3006/health || echo 'Document service health check failed'
+          curl -f http://notification-service:3007/health || echo 'Notification service health check failed'
+          curl -f http://reporting-service:3008/health || echo 'Reporting service health check failed'
+          sleep 30
+        done
+      "
+    depends_on:
+      - gateway
+      - auth-service
+      - user-service
+      - dashboard-service
+      - cash-call-service
+      - affiliate-service
+      - document-service
+      - notification-service
+      - reporting-service
+    networks:
+      - cash-call-network
+
+networks:
+  cash-call-network:
+    driver: bridge
+
+volumes:
+  shared-data:

@@ -32,8 +32,13 @@ import {
   createStatusOption,
   updateStatusOption,
   deleteStatusOption,
+  updateChecklistTemplateItem,
+  addChecklistTemplateItem,
+  deleteChecklistTemplateItem,
   type StatusOption
 } from "@/lib/firebase-database"
+import { doc, getDoc } from "firebase/firestore"
+import { db } from "@/lib/firebase"
 
 interface ChecklistItem {
   itemNo: string
@@ -83,7 +88,17 @@ export default function SettingsPage() {
         getAvailableChecklistItems(),
         getStatusOptions()
       ])
-      setChecklistItems(items)
+      
+      // Check if there are saved template items in Firebase
+      const templateRef = doc(db, 'checklist_templates', 'default')
+      const templateDoc = await getDoc(templateRef)
+      
+      let finalItems = items
+      if (templateDoc.exists() && templateDoc.data().items) {
+        finalItems = templateDoc.data().items
+      }
+      
+      setChecklistItems(finalItems)
       setStatusOptions(statuses)
     } catch (error) {
       console.error("Error loading settings data:", error)
@@ -92,16 +107,9 @@ export default function SettingsPage() {
 
   const handleSaveChecklistItem = async (groupKey: string, itemNo: string, updates: Partial<ChecklistItem>) => {
     try {
-      // In a real implementation, you would save to Firebase
-      const updatedItems = { ...checklistItems }
-      const groupItems = updatedItems[groupKey]
-      const itemIndex = groupItems.findIndex((item: ChecklistItem) => item.itemNo === itemNo)
-      
-      if (itemIndex !== -1) {
-        updatedItems[groupKey][itemIndex] = { ...groupItems[itemIndex], ...updates }
-        setChecklistItems(updatedItems)
-      }
-      
+      // Save to Firebase
+      const updatedItems = await updateChecklistTemplateItem(groupKey, itemNo, updates)
+      setChecklistItems(updatedItems)
       setEditingItem(null)
     } catch (error) {
       console.error("Error saving checklist item:", error)
@@ -112,11 +120,10 @@ export default function SettingsPage() {
     try {
       if (!newItem.itemNo || !newItem.documentList) return
 
-      const updatedItems = { ...checklistItems }
-      updatedItems[groupKey].push({
+      // Save to Firebase
+      const updatedItems = await addChecklistTemplateItem(groupKey, {
         itemNo: newItem.itemNo,
         documentList: newItem.documentList,
-        status: "Not Started",
         applicableTo: newItem.applicableTo
       })
 
@@ -131,8 +138,8 @@ export default function SettingsPage() {
     if (!confirm("Are you sure you want to delete this item?")) return
 
     try {
-      const updatedItems = { ...checklistItems }
-      updatedItems[groupKey] = updatedItems[groupKey].filter((item: ChecklistItem) => item.itemNo !== itemNo)
+      // Delete from Firebase
+      const updatedItems = await deleteChecklistTemplateItem(groupKey, itemNo)
       setChecklistItems(updatedItems)
     } catch (error) {
       console.error("Error deleting checklist item:", error)

@@ -5,16 +5,49 @@ import { getStorage, connectStorageEmulator } from 'firebase/storage'
 import { getFunctions, connectFunctionsEmulator } from 'firebase/functions'
 import { getAnalytics, isSupported } from 'firebase/analytics'
 
-// Firebase configuration - use environment variables if available, fallback to hardcoded values
+// Firebase configuration - use environment variables if available, fallback to correct hardcoded values
 const firebaseConfig = {
-  apiKey: process.env.NEXT_PUBLIC_FIREBASE_API_KEY || "AIzaSyBIay1Tt0Xml7JaJlfEpMSKlg8ojBX3Hsc",
-  authDomain: process.env.NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN || "cash-call-management-app.firebaseapp.com",
-  databaseURL: process.env.NEXT_PUBLIC_FIREBASE_DATABASE_URL || "https://cash-call-management-app-default-rtdb.firebaseio.com",
-  projectId: process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID || "cash-call-management-app",
-  storageBucket: process.env.NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET || "cash-call-management-app.firebasestorage.app",
-  messagingSenderId: process.env.NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID || "654299803740",
-  appId: process.env.NEXT_PUBLIC_FIREBASE_APP_ID || "1:654299803740:web:34cad6bfecc4ca1f0bf699"
+  apiKey: process.env.NEXT_PUBLIC_FIREBASE_API_KEY || "AIzaSyArgq_mKPHX5Oi8lqihFlrcW8F4L0gWIds",
+  authDomain: process.env.NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN || "prj-adc-gcp-coop-poc.firebaseapp.com",
+  databaseURL: process.env.NEXT_PUBLIC_FIREBASE_DATABASE_URL || "https://prj-adc-gcp-coop-poc-default-rtdb.firebaseio.com",
+  projectId: process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID || "prj-adc-gcp-coop-poc",
+  storageBucket: process.env.NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET || "prj-adc-gcp-coop-poc.firebasestorage.app",
+  messagingSenderId: process.env.NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID || "1005601289659",
+  appId: process.env.NEXT_PUBLIC_FIREBASE_APP_ID || "1:1005601289659:web:ae6bd8c2500bb36759409e"
 }
+
+// Debug: Log the configuration being used
+console.log('🔥 Firebase Config Being Used:', {
+  projectId: firebaseConfig.projectId,
+  authDomain: firebaseConfig.authDomain,
+  apiKey: firebaseConfig.apiKey?.substring(0, 10) + '...',
+  appId: firebaseConfig.appId,
+  envVars: {
+    NEXT_PUBLIC_FIREBASE_PROJECT_ID: process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID,
+    NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN: process.env.NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN,
+    NEXT_PUBLIC_FIREBASE_APP_ID: process.env.NEXT_PUBLIC_FIREBASE_APP_ID
+  }
+})
+
+// Debug: Log all environment variables
+console.log('🔍 All Environment Variables:', {
+  NODE_ENV: process.env.NODE_ENV,
+  NEXT_PUBLIC_FIREBASE_API_KEY: process.env.NEXT_PUBLIC_FIREBASE_API_KEY?.substring(0, 10) + '...',
+  NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN: process.env.NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN,
+  NEXT_PUBLIC_FIREBASE_PROJECT_ID: process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID,
+  NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET: process.env.NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET,
+  NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID: process.env.NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID,
+  NEXT_PUBLIC_FIREBASE_APP_ID: process.env.NEXT_PUBLIC_FIREBASE_APP_ID?.substring(0, 10) + '...',
+  NEXT_PUBLIC_FIREBASE_MEASUREMENT_ID: process.env.NEXT_PUBLIC_FIREBASE_MEASUREMENT_ID
+})
+
+// Test: Check if .env.local is being read
+console.log('🧪 Environment File Test:', {
+  hasApiKey: !!process.env.NEXT_PUBLIC_FIREBASE_API_KEY,
+  hasProjectId: !!process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID,
+  projectIdValue: process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID,
+  expectedProjectId: 'prj-adc-gcp-coop-poc'
+})
 
 // Initialize Firebase
 let app
@@ -44,7 +77,7 @@ export const analytics = isSupported().then(yes => yes ? getAnalytics(app) : nul
 // Connect to emulators in development
 // WARNING: Firebase emulators use ephemeral storage - data is lost when emulator restarts
 // Set FIREBASE_USE_EMULATOR=true only for testing, not for persistent development
-const useEmulator = process.env.NODE_ENV === 'development' && process.env.FIREBASE_USE_EMULATOR === 'true'
+const useEmulator = process.env.NODE_ENV === 'development' && process.env.FIREBASE_USE_EMULATOR === 'true' // Force emulator for now
 
 if (useEmulator) {
   try {
@@ -62,11 +95,11 @@ if (useEmulator) {
       connectFunctionsEmulator(functions, emulatorHost, parseInt(functionsPort.toString()))
       console.log('⚠️  Connected to Firebase emulators - DATA WILL BE LOST ON RESTART')
       console.log('💡 To use persistent data, set FIREBASE_USE_EMULATOR=false or remove the environment variable')
-    } catch (error) {
+    } catch (error: any) {
       // Emulators already connected or not available
       console.log('Firebase emulators already connected or not available:', error.message)
     }
-  } catch (error) {
+  } catch (error: any) {
     console.error('Error connecting to Firebase emulators:', error)
   }
 } else {

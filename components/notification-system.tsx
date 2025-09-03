@@ -1,21 +1,31 @@
 "use client"
 
-import { useState, useEffect, createContext, useContext } from 'react'
+import { useState, useEffect, createContext, useContext, useCallback } from 'react'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Bell, X, CheckCircle, AlertCircle, Info, Clock } from 'lucide-react'
+import { useAuth } from '@/lib/firebase-auth-context'
 
 export interface Notification {
   id: string
-  type: 'success' | 'error' | 'warning' | 'info'
+  type: 'success' | 'error' | 'warning' | 'info' | 'assignment' | 'unassignment' | 'approval' | 'rejection'
   title: string
   message: string
   timestamp: Date
   read: boolean
+  priority: 'low' | 'medium' | 'high' | 'urgent'
+  category: 'system' | 'cash_call' | 'assignment' | 'approval' | 'document' | 'user'
   action?: {
     label: string
-    onClick: () => void
+    onClick: (notificationId?: string) => void
   }
+  metadata?: {
+    cashCallId?: string
+    affiliateId?: string
+    userId?: string
+    documentId?: string
+  }
+  expiresAt?: Date
 }
 
 interface NotificationContextType {
@@ -26,6 +36,8 @@ interface NotificationContextType {
   removeNotification: (id: string) => void
   clearAll: () => void
   unreadCount: number
+  loadNotifications: (userId: string) => Promise<void>
+  isLoading: boolean
 }
 
 const NotificationContext = createContext<NotificationContextType | undefined>(undefined)
@@ -40,8 +52,25 @@ export function useNotifications() {
 
 export function NotificationProvider({ children }: { children: React.ReactNode }) {
   const [notifications, setNotifications] = useState<Notification[]>([])
+  const [isLoading, setIsLoading] = useState(false)
+  const { user } = useAuth()
 
-  const addNotification = (notification: Omit<Notification, 'id' | 'timestamp' | 'read'>) => {
+  const removeNotification = useCallback(async (id: string) => {
+    try {
+      // Delete from Firebase first
+      const { deleteNotification } = await import('@/lib/firebase-database')
+      await deleteNotification(id)
+      
+      // Then update local state
+      setNotifications(prev => prev.filter(notif => notif.id !== id))
+    } catch (error) {
+      console.error('Error deleting notification:', error)
+      // Still remove from local state even if Firebase fails
+      setNotifications(prev => prev.filter(notif => notif.id !== id))
+    }
+  }, [])
+
+  const addNotification = useCallback((notification: Omit<Notification, 'id' | 'timestamp' | 'read'>) => {
     const newNotification: Notification = {
       ...notification,
       id: Date.now().toString(),
@@ -57,29 +86,154 @@ export function NotificationProvider({ children }: { children: React.ReactNode }
         removeNotification(newNotification.id)
       }, 5000)
     }
-  }
+  }, [removeNotification])
 
-  const markAsRead = (id: string) => {
+  // Function to load notifications from Firebase
+  const loadNotifications = useCallback(async (userId: string) => {
+    if (!userId) return
+    
+    setIsLoading(true)
+    try {
+      const { getUserNotifications } = await import('@/lib/firebase-database')
+      const firebaseNotifications = await getUserNotifications(userId)
+      
+      // Convert Firebase notifications to local format
+      const convertedNotifications: Notification[] = firebaseNotifications.map((notif: any) => ({
+        id: notif.id,
+        type: notif.type === 'assignment' ? 'info' : 
+              notif.type === 'unassignment' ? 'warning' : 
+              notif.type === 'success' ? 'success' : 'info',
+        title: notif.title,
+        message: notif.message,
+        timestamp: notif.created_at || new Date(),
+        read: notif.read || false,
+        priority: notif.priority || 'medium',
+        category: notif.category || 'system',
+        metadata: notif.metadata || {},
+        expiresAt: notif.expiresAt ? new Date(notif.expiresAt) : undefined,
+        action: notif.cash_call_id ? {
+          label: 'View Details',
+          onClick: async () => {
+            // Mark notification as read and remove it
+            if (notif.id) {
+              await markAsRead(notif.id)
+            }
+            // Navigate to cash call details
+            window.location.href = `/cash-call/${notif.cash_call_id}`
+          }
+        } : undefined
+      }))
+      
+      setNotifications(convertedNotifications)
+    } catch (error) {
+      console.error('Error loading notifications:', error)
+    } finally {
+      setIsLoading(false)
+    }
+  }, [])
+
+  const markAsRead = useCallback(async (id: string) => {
     setNotifications(prev => 
       prev.map(notif => 
         notif.id === id ? { ...notif, read: true } : notif
       )
     )
-  }
+    
+    // Mark as read in Firebase
+    try {
+      const { markNotificationAsRead } = await import('@/lib/firebase-database')
+      await markNotificationAsRead(id)
+    } catch (error) {
+      console.error('Error marking notification as read in Firebase:', error)
+    }
+  }, [])
 
-  const markAllAsRead = () => {
+  // Set up real-time notification listener
+  useEffect(() => {
+    let unsubscribe: (() => void) | null = null
+    
+    const setupRealtimeNotifications = async () => {
+      try {
+        const { db } = await import('@/lib/firebase')
+        const { collection, query, where, orderBy, onSnapshot } = await import('firebase/firestore')
+        
+        // Use user from the top level of the component
+        if (!user?.uid) return
+        
+        const notificationsRef = collection(db, 'notifications')
+        const q = query(
+          notificationsRef,
+          where('user_id', '==', user.uid)
+        )
+        
+        unsubscribe = onSnapshot(q, (snapshot) => {
+          const firebaseNotifications = snapshot.docs.map(doc => ({
+            id: doc.id,
+            ...doc.data()
+          }))
+          
+          // Convert Firebase notifications to local format and sort by created_at desc
+          const convertedNotifications: Notification[] = firebaseNotifications
+            .map((notif: any) => ({
+              id: notif.id,
+              type: (notif.type === 'assignment' ? 'info' : 
+                    notif.type === 'unassignment' ? 'warning' : 
+                    notif.type === 'success' ? 'success' : 'info') as 'success' | 'error' | 'warning' | 'info',
+              title: notif.title,
+              message: notif.message,
+              timestamp: notif.created_at?.toDate() || new Date(),
+              read: notif.read || false,
+              action: notif.cash_call_id ? {
+                label: 'View Details',
+                onClick: async () => {
+                  if (notif.id) {
+                    await markAsRead(notif.id)
+                  }
+                  window.location.href = `/cash-call/${notif.cash_call_id}`
+                }
+              } : undefined
+            }))
+            .sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime()) // Sort by newest first
+          
+          setNotifications(convertedNotifications)
+        }, (error) => {
+          console.error('Error in real-time notifications:', error)
+        })
+      } catch (error) {
+        console.error('Error setting up real-time notifications:', error)
+      }
+    }
+    
+    setupRealtimeNotifications()
+    
+    return () => {
+      if (unsubscribe) {
+        unsubscribe()
+      }
+    }
+  }, [user?.uid, markAsRead])
+
+  const markAllAsRead = useCallback(() => {
     setNotifications(prev => 
       prev.map(notif => ({ ...notif, read: true }))
     )
-  }
+  }, [])
 
-  const removeNotification = (id: string) => {
-    setNotifications(prev => prev.filter(notif => notif.id !== id))
-  }
-
-  const clearAll = () => {
-    setNotifications([])
-  }
+  const clearAll = useCallback(async () => {
+    try {
+      // Delete all notifications from Firebase
+      const { deleteNotification } = await import('@/lib/firebase-database')
+      const deletePromises = notifications.map(notif => deleteNotification(notif.id))
+      await Promise.all(deletePromises)
+      
+      // Clear local state
+      setNotifications([])
+    } catch (error) {
+      console.error('Error clearing all notifications:', error)
+      // Still clear local state even if Firebase fails
+      setNotifications([])
+    }
+  }, [notifications])
 
   const unreadCount = notifications.filter(n => !n.read).length
 
@@ -91,7 +245,9 @@ export function NotificationProvider({ children }: { children: React.ReactNode }
       markAllAsRead,
       removeNotification,
       clearAll,
-      unreadCount
+      unreadCount,
+      loadNotifications,
+      isLoading
     }}>
       {children}
     </NotificationContext.Provider>
@@ -99,8 +255,16 @@ export function NotificationProvider({ children }: { children: React.ReactNode }
 }
 
 export function NotificationBell() {
-  const { unreadCount, notifications, markAllAsRead, clearAll } = useNotifications()
+  const { unreadCount, notifications, markAllAsRead, clearAll, loadNotifications, isLoading, markAsRead, removeNotification } = useNotifications()
+  const { user } = useAuth()
   const [isOpen, setIsOpen] = useState(false)
+
+  // Load notifications when bell is opened
+  useEffect(() => {
+    if (isOpen && user?.uid) {
+      loadNotifications(user.uid)
+    }
+  }, [isOpen, user?.uid, loadNotifications])
 
   const getIcon = (type: Notification['type']) => {
     switch (type) {
@@ -156,7 +320,7 @@ export function NotificationBell() {
                 <Button
                   size="sm"
                   variant="outline"
-                  onClick={clearAll}
+                  onClick={async () => await clearAll()}
                   className="text-xs"
                 >
                   Clear all
@@ -166,7 +330,12 @@ export function NotificationBell() {
           </div>
 
           <div className="p-2">
-            {notifications.length === 0 ? (
+            {isLoading ? (
+              <div className="text-center py-8 text-gray-500">
+                <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-500 mx-auto mb-2"></div>
+                <p>Loading notifications...</p>
+              </div>
+            ) : notifications.length === 0 ? (
               <div className="text-center py-8 text-gray-500">
                 <Bell className="h-8 w-8 mx-auto mb-2 text-gray-300" />
                 <p>No notifications</p>
@@ -183,7 +352,7 @@ export function NotificationBell() {
                       markAsRead(notification.id)
                     }
                     if (notification.action) {
-                      notification.action.onClick()
+                      notification.action.onClick(notification.id)
                     }
                   }}
                 >
@@ -197,9 +366,9 @@ export function NotificationBell() {
                         <Button
                           size="sm"
                           variant="ghost"
-                          onClick={(e) => {
+                          onClick={async (e) => {
                             e.stopPropagation()
-                            removeNotification(notification.id)
+                            await removeNotification(notification.id)
                           }}
                           className="h-4 w-4 p-0 text-gray-400 hover:text-gray-600"
                         >
@@ -219,7 +388,7 @@ export function NotificationBell() {
                             variant="outline"
                             onClick={(e) => {
                               e.stopPropagation()
-                              notification.action!.onClick()
+                              notification.action!.onClick(notification.id)
                             }}
                             className="text-xs"
                           >
@@ -266,6 +435,8 @@ export function useStatusChangeNotifications() {
       type: getNotificationType(newStatus),
       title: `Cash Call Status Updated`,
       message: `Cash call ${cashCallId} for ${affiliateName} changed from ${statusDisplayNames[oldStatus as keyof typeof statusDisplayNames]} to ${statusDisplayNames[newStatus as keyof typeof statusDisplayNames]}`,
+      priority: 'medium',
+      category: 'cash_call',
       action: {
         label: 'View Details',
         onClick: () => {
@@ -277,4 +448,53 @@ export function useStatusChangeNotifications() {
   }
 
   return { notifyStatusChange }
+}
+
+// Hook for assignment notifications
+export function useAssignmentNotifications() {
+  const { addNotification, markAsRead } = useNotifications()
+
+  const notifyAssignment = (cashCallId: string, cashCallTitle: string, affiliateName: string, assignedBy: string) => {
+    addNotification({
+      type: 'info',
+      title: `Cash Call Assigned`,
+      message: `You have been assigned cash call "${cashCallTitle}" for ${affiliateName} by ${assignedBy}`,
+      priority: 'high',
+      category: 'assignment',
+      action: {
+        label: 'View Details',
+        onClick: async (notificationId?: string) => {
+          // Mark notification as read and remove it
+          if (notificationId) {
+            await markAsRead(notificationId)
+          }
+          // Navigate to cash call details
+          window.location.href = `/cash-call/${cashCallId}`
+        }
+      }
+    })
+  }
+
+  const notifyUnassignment = (cashCallId: string, cashCallTitle: string, affiliateName: string) => {
+    addNotification({
+      type: 'warning',
+      title: `Cash Call Unassigned`,
+      message: `Cash call "${cashCallTitle}" for ${affiliateName} has been unassigned from you`,
+      priority: 'medium',
+      category: 'assignment',
+      action: {
+        label: 'View Details',
+        onClick: async (notificationId?: string) => {
+          // Mark notification as read and remove it
+          if (notificationId) {
+            await markAsRead(notificationId)
+          }
+          // Navigate to cash call details
+          window.location.href = `/cash-call/${cashCallId}`
+        }
+      }
+    })
+  }
+
+  return { notifyAssignment, notifyUnassignment }
 }

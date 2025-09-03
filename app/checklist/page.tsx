@@ -8,7 +8,7 @@ import { Input } from "@/components/ui/input"
 import { Badge } from "@/components/ui/badge"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
+
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import {
   Dialog,
@@ -16,7 +16,6 @@ import {
   DialogDescription,
   DialogHeader,
   DialogTitle,
-  DialogTrigger,
 } from "@/components/ui/dialog"
 import {
   AlertDialog,
@@ -30,6 +29,7 @@ import {
   AlertDialogTrigger,
 } from "@/components/ui/alert-dialog"
 import { Label } from "@/components/ui/label"
+import { Checkbox } from "@/components/ui/checkbox"
 import {
   Plus,
   LogOut,
@@ -40,1690 +40,1056 @@ import {
   Clock,
   Edit,
   Trash2,
-  Save,
   X,
-  FolderSyncIcon as Sync,
+  Shield,
 } from "lucide-react"
 import { useAuth } from "@/lib/firebase-auth-context"
-import { getAffiliates, type Affiliate } from "@/lib/firebase-database"
+import { getAffiliates, type Affiliate, getCashCalls, getCashCallsForUser, type CashCall, getDocumentRequirements, type DocumentRequirement } from "@/lib/firebase-database"
 import {
   getAllChecklists, 
-  getChecklistByAffiliate, 
+  getChecklistsForUser,
   createAffiliateChecklist,
   updateChecklistItem,
-  addChecklistItem,
-  deleteChecklistItem,
   deleteAffiliateChecklist,
-  updateAffiliateChecklistName,
-  updateGroupName,
   getStatusOptions,
-  createStatusOption,
-  updateStatusOption,
-  deleteStatusOption,
-  standardizeExistingChecklists,
   type AffiliateChecklist,
   type ChecklistItem,
   type ChecklistGroup,
   type StatusOption
 } from "@/lib/firebase-database"
 import { AdminSettings } from "@/components/admin-settings"
-import { ErrorBoundary } from "@/components/error-boundary"
 import { AnimatedLoading } from "@/components/animated-loading"
 
 export default function ChecklistPage() {
   const { user, userProfile, signOut } = useAuth()
   const [affiliates, setAffiliates] = useState<Affiliate[]>([])
   const [checklists, setChecklists] = useState<AffiliateChecklist[]>([])
+  const [cashCalls, setCashCalls] = useState<CashCall[]>([])
   const [statusOptions, setStatusOptions] = useState<StatusOption[]>([])
-  const [activeTab, setActiveTab] = useState<string>("")
+
   const [isLoading, setIsLoading] = useState(true)
   const [isRefreshing, setIsRefreshing] = useState(false)
-  const [error, setError] = useState("")
-  const [success, setSuccess] = useState("")
+  const [notifications, setNotifications] = useState<Array<{
+    id: string
+    type: 'success' | 'error' | 'warning' | 'info'
+    title: string
+    message: string
+    duration?: number
+    action?: {
+      label: string
+      onClick: () => void
+    }
+  }>>([])
   const router = useRouter()
 
-  // Add this state near the other state declarations
-  const [currentNextEraItems, setCurrentNextEraItems] = useState<{
-    groups: Array<{ name: string; items: Array<{ itemNo: string; documentList: string }> }>
-  } | null>(null)
+  // Notification helper functions
+  const addNotification = (type: 'success' | 'error' | 'warning' | 'info', title: string, message: string, duration = 5000, action?: { label: string; onClick: () => void }) => {
+    const id = Date.now().toString()
+    setNotifications(prev => [...prev, { id, type, title, message, duration, action }])
+    
+    // Auto-dismiss after duration
+    if (duration > 0) {
+      setTimeout(() => {
+        removeNotification(id)
+      }, duration)
+    }
+  }
+
+  const removeNotification = (id: string) => {
+    setNotifications(prev => prev.filter(notification => notification.id !== id))
+  }
+
+  const clearAllNotifications = () => {
+    setNotifications([])
+  }
 
   // Search and filter states
   const [searchTerm, setSearchTerm] = useState("")
   const [affiliateFilter, setAffiliateFilter] = useState("all")
   const [expandedChecklists, setExpandedChecklists] = useState<Set<string>>(new Set())
-  const [viewMode, setViewMode] = useState<'tabs' | 'stacked'>('stacked')
-
-  // Bulk update states
-  const [selectedItems, setSelectedItems] = useState<Set<string>>(new Set())
-  const [isBulkUpdateOpen, setIsBulkUpdateOpen] = useState(false)
-  const [bulkUpdateStatus, setBulkUpdateStatus] = useState("")
+  const [selectedChecklists, setSelectedChecklists] = useState<Set<string>>(new Set())
+  const [bulkMode, setBulkMode] = useState(false)
 
   // Dialog states
-  const [isAddAffiliateOpen, setIsAddAffiliateOpen] = useState(false)
-  const [isRenameOpen, setIsRenameOpen] = useState(false)
-  const [isStandardizeOpen, setIsStandardizeOpen] = useState(false)
-  const [selectedAffiliateId, setSelectedAffiliateId] = useState("")
-  const [newAffiliateName, setNewAffiliateName] = useState("")
-
-  // Editing states
-  const [editingItem, setEditingItem] = useState<{ checklistId: string; groupId: string; itemId: string } | null>(null)
-  const [editingValues, setEditingValues] = useState<{ itemNo: string; documentList: string; status: string }>({
-    itemNo: "",
-    documentList: "",
-    status: "",
-  })
-
-  // Group editing states
-  const [editingGroup, setEditingGroup] = useState<{ checklistId: string; groupId: string } | null>(null)
-  const [editingGroupName, setEditingGroupName] = useState("")
+  const [isCreateChecklistOpen, setIsCreateChecklistOpen] = useState(false)
+  const [selectedAffiliateForChecklist, setSelectedAffiliateForChecklist] = useState<Affiliate | null>(null)
+  const [selectedCashCallForChecklist, setSelectedCashCallForChecklist] = useState<CashCall | null>(null)
+  const [checklistTemplateType, setChecklistTemplateType] = useState<'CAPEX' | 'OPEX'>('CAPEX')
 
   useEffect(() => {
-    if (!user) {
-      router.push("/login")
-      return
-    }
-    
-    if (user) {
+    if (user && userProfile) {
       loadData()
     }
-  }, [user, router])
+  }, [user, userProfile])
 
   const loadData = async () => {
     try {
       setIsLoading(true)
-      setError("")
-      setIsRefreshing(true)
-
-      const [affiliatesData, checklistsData, statusOptionsData] = await Promise.all([
-        getAffiliates(),
-        getAllChecklists(),
-        getStatusOptions(),
-      ])
-
-      setAffiliates(affiliatesData)
-      setChecklists(checklistsData)
-      setStatusOptions(statusOptionsData)
-
-      // Set active tab to first checklist if available
-      if (checklistsData.length > 0 && !activeTab) {
-        setActiveTab(checklistsData[0].id)
+      
+      if (!user?.uid) {
+        throw new Error('User not authenticated')
       }
+      
+      // Load data progressively for better perceived performance
+      console.log('Starting data load...')
+      
+      // Add timeout to prevent hanging
+      const timeoutPromise = new Promise((_, reject) => {
+        setTimeout(() => reject(new Error('Data loading timeout')), 30000) // 30 second timeout
+      })
+      
+      const loadDataPromise = async () => {
+        // First, load status options (usually small and fast)
+        const statusOptionsData = await getStatusOptions()
+        setStatusOptions(statusOptionsData)
+        console.log('Status options loaded')
+        
+        // Then load affiliates (also usually fast)
+        const affiliatesData = await getAffiliates()
+        setAffiliates(affiliatesData)
+        console.log('Affiliates loaded')
+        
+        // Finally load the heavier data in parallel
+        const [checklistsData, cashCallsData] = await Promise.all([
+          getChecklistsForUser(user.uid, userProfile?.role || 'viewer', userProfile?.affiliate_company_id),
+          getCashCallsForUser(user.uid, userProfile?.role || 'viewer', userProfile?.affiliate_company_id)
+        ])
 
-      // Get current NextEra items separately to avoid blocking
-      try {
-        const nextEraItems = await getChecklistByAffiliate("NextEra") // Assuming NextEra is the affiliate ID for standard items
-        setCurrentNextEraItems(nextEraItems)
-      } catch (err) {
-        console.error("Error loading NextEra items:", err)
+        setChecklists(checklistsData)
+        setCashCalls(cashCallsData)
+        console.log('All data loaded successfully')
       }
+      
+      await Promise.race([loadDataPromise(), timeoutPromise])
     } catch (err) {
       console.error("Error loading data:", err)
-      setError("Failed to load data. Please try refreshing the page.")
+      if (err instanceof Error && err.message === 'Data loading timeout') {
+        addNotification('error', 'Loading Timeout', 'Data loading took too long. Please try refreshing the page.', 10000)
+      } else {
+        addNotification('error', 'Data Loading Failed', 'Failed to load data. Please try again.', 8000)
+      }
     } finally {
       setIsLoading(false)
-      setIsRefreshing(false)
     }
+  }
+
+  const handleRefresh = async () => {
+    setIsRefreshing(true)
+    await loadData()
+    setIsRefreshing(false)
   }
 
   const handleLogout = async () => {
-    await signOut()
-    router.push("/")
-  }
-
-  const handleRefresh = () => {
-    if (user) {
-      loadData()
-    }
-  }
-
-  // Filter and search functions
-  const filteredChecklists = checklists.filter(checklist => {
-    // Affiliate filter
-    if (affiliateFilter !== 'all' && checklist.affiliate_id !== affiliateFilter) {
-      return false
-    }
-
-    // Search filter - check checklist name, group names, and item content
-    if (searchTerm) {
-      const searchLower = searchTerm.toLowerCase()
-      const checklistNameMatch = checklist.affiliate_name?.toLowerCase().includes(searchLower) || false
-      const groupMatch = checklist.groups.some(group => 
-        group.name.toLowerCase().includes(searchLower) ||
-        group.items.some(item => 
-          item.itemNo.toLowerCase().includes(searchLower) ||
-          item.documentList.toLowerCase().includes(searchLower) ||
-          item.status.toLowerCase().includes(searchLower)
-        )
-      )
-      
-      if (!checklistNameMatch && !groupMatch) {
-        return false
-      }
-    }
-
-    return true
-  })
-
-  const toggleChecklistExpansion = (checklistId: string) => {
-    const newExpanded = new Set(expandedChecklists)
-    if (newExpanded.has(checklistId)) {
-      newExpanded.delete(checklistId)
-    } else {
-      newExpanded.add(checklistId)
-    }
-    setExpandedChecklists(newExpanded)
-  }
-
-  const clearFilters = () => {
-    setSearchTerm("")
-    setAffiliateFilter("all")
-  }
-
-  const handleAddAffiliate = async () => {
-    const selectedAffiliate = affiliates.find((a) => a.id === selectedAffiliateId)
-    if (!selectedAffiliate) {
-      setError("Please select an affiliate")
-      return
-    }
-
     try {
-      setError("")
-      const newChecklist = await createAffiliateChecklist(selectedAffiliate.id, selectedAffiliate.name)
-      setChecklists([...checklists, newChecklist])
-      setActiveTab(selectedAffiliate.id)
-      setIsAddAffiliateOpen(false)
-      setSelectedAffiliateId("")
-      setSuccess("Affiliate checklist created successfully with current NextEra items")
-      setTimeout(() => setSuccess(""), 3000)
-    } catch (err: any) {
-      console.error("Error creating affiliate checklist:", err)
-      setError(err instanceof Error ? err.message : "Failed to create affiliate checklist")
-    }
-  }
-
-  const handleStandardizeChecklists = async () => {
-    try {
-      setError("")
-      setIsRefreshing(true)
-      await standardizeExistingChecklists()
-      await loadData() // Reload data to show updated checklists
-      setIsStandardizeOpen(false)
-      setSuccess("All checklists have been standardized with the latest items")
-      setTimeout(() => setSuccess(""), 3000)
+      await signOut()
+      router.push("/login")
     } catch (err) {
-      console.error("Error standardizing checklists:", err)
-      setError("Failed to standardize checklists")
-    } finally {
-      setIsRefreshing(false)
-    }
-  }
-
-  const handleRenameAffiliate = async () => {
-    if (!newAffiliateName.trim()) {
-      setError("Please enter a valid name")
-      return
-    }
-
-    const checklist = checklists.find((c) => c.affiliate_id === activeTab)
-    if (!checklist) return
-
-    try {
-      setError("")
-      const updatedChecklist = await updateAffiliateChecklistName(checklist.id, newAffiliateName.trim())
-      setChecklists(checklists.map((c) => (c.id === checklist.id ? updatedChecklist : c)))
-      setIsRenameOpen(false)
-      setNewAffiliateName("")
-      setSuccess("Affiliate name updated successfully")
-      setTimeout(() => setSuccess(""), 3000)
-    } catch (err) {
-      console.error("Error renaming affiliate:", err)
-      setError("Failed to rename affiliate")
-    }
-  }
-
-  const handleDeleteAffiliate = async (checklistId: string) => {
-    if (!confirm("Are you sure you want to delete this affiliate checklist? This action cannot be undone.")) {
-      return
-    }
-
-    try {
-      setError("")
-      await deleteAffiliateChecklist(checklistId)
-      const updatedChecklists = checklists.filter((c) => c.id !== checklistId)
-      setChecklists(updatedChecklists)
-
-      // Update active tab if the deleted one was active
-      if (updatedChecklists.length > 0) {
-        setActiveTab(updatedChecklists[0].affiliate_id)
-      } else {
-        setActiveTab("")
-      }
-
-      setSuccess("Affiliate checklist deleted successfully")
-      setTimeout(() => setSuccess(""), 3000)
-    } catch (err) {
-      console.error("Error deleting affiliate checklist:", err)
-      setError("Failed to delete affiliate checklist")
+      console.error("Error logging out:", err)
+      addNotification('error', 'Logout Failed', 'Failed to logout. Please try again.', 5000)
     }
   }
 
   const handleUpdateItemStatus = async (checklistId: string, groupId: string, itemId: string, newStatus: string) => {
     try {
-      setError("")
-      const updatedItem = await updateChecklistItem(checklistId, groupId, itemId, {
-        status: newStatus,
-      })
-
-      // Update local state
-      setChecklists(
-        checklists.map((checklist) =>
-          checklist.id === checklistId
-            ? {
-                ...checklist,
-                groups: checklist.groups.map((group) =>
-                  group.id === groupId
-                    ? {
-                        ...group,
-                        items: group.items.map((item) => (item.id === itemId ? updatedItem : item)),
-                      }
-                    : group,
-                ),
-              }
-            : checklist,
-        ),
-      )
-    } catch (err) {
-      console.error("Error updating item status:", err)
-      setError("Failed to update item status")
-    }
-  }
-
-  const handleStartEdit = (checklistId: string, groupId: string, item: ChecklistItem) => {
-    setEditingItem({ checklistId, groupId, itemId: item.id })
-    setEditingValues({
-      itemNo: item.itemNo,
-      documentList: item.documentList,
-      status: item.status,
-    })
-  }
-
-  const handleSaveEdit = async () => {
-    if (!editingItem) return
-
-    try {
-      setError("")
-      const updatedItem = await updateChecklistItem(
-        editingItem.checklistId,
-        editingItem.groupId,
-        editingItem.itemId,
-        {
-          itemNo: editingValues.itemNo,
-          documentList: editingValues.documentList,
-          status: editingValues.status,
-        },
-      )
-
-      // Update local state
-      setChecklists(
-        checklists.map((checklist) =>
-          checklist.id === editingItem.checklistId
-            ? {
-                ...checklist,
-                groups: checklist.groups.map((group) =>
-                  group.id === editingItem.groupId
-                    ? {
-                        ...group,
-                        items: group.items.map((item) => (item.id === editingItem.itemId ? updatedItem : item)),
-                      }
-                    : group,
-                ),
-              }
-            : checklist,
-        ),
-      )
-
-      setEditingItem(null)
-      setSuccess("Item updated successfully")
-      setTimeout(() => setSuccess(""), 3000)
-    } catch (err) {
-      console.error("Error updating item:", err)
-      setError("Failed to update item")
-    }
-  }
-
-  const handleCancelEdit = () => {
-    setEditingItem(null)
-    setEditingValues({ itemNo: "", documentList: "", status: "" })
-  }
-
-  const handleAddItem = async (checklistId: string, groupId: string) => {
-    const checklist = checklists.find((c) => c.id === checklistId)
-    const group = checklist?.groups.find((g) => g.id === groupId)
-    if (!group) return
-
-    const nextItemNo = (group.items.length + 1).toString()
-
-    try {
-      setError("")
-      const newItem = await addChecklistItem(checklistId, groupId, {
-        itemNo: nextItemNo,
-        documentList: "New Document",
-        status: "Not Started",
-        created_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
-      })
-
-      // Update local state
-      setChecklists(
-        checklists.map((checklist) =>
-          checklist.id === checklistId
-            ? {
-                ...checklist,
-                groups: checklist.groups.map((group) =>
-                  group.id === groupId ? { ...group, items: [...group.items, newItem] } : group,
-                ),
-              }
-            : checklist,
-        ),
-      )
-
-      setSuccess("Item added successfully")
-      setTimeout(() => setSuccess(""), 3000)
-    } catch (err) {
-      console.error("Error adding item:", err)
-      setError("Failed to add item")
-    }
-  }
-
-  const handleDeleteItem = async (checklistId: string, groupId: string, itemId: string) => {
-    if (!confirm("Are you sure you want to delete this item?")) {
-      return
-    }
-
-    try {
-      setError("")
-      await deleteChecklistItem(checklistId, groupId, itemId)
-
-      // Update local state
-      setChecklists(
-        checklists.map((checklist) =>
-          checklist.id === checklistId
-            ? {
-                ...checklist,
-                groups: checklist.groups.map((group) =>
-                  group.id === groupId ? { ...group, items: group.items.filter((item) => item.id !== itemId) } : group,
-                ),
-              }
-            : checklist,
-        ),
-      )
-
-      setSuccess("Item deleted successfully")
-      setTimeout(() => setSuccess(""), 3000)
-    } catch (err) {
-      console.error("Error deleting item:", err)
-      setError("Failed to delete item")
-    }
-  }
-
-  const handleStartGroupEdit = (checklistId: string, groupId: string, currentName: string) => {
-    setEditingGroup({ checklistId, groupId })
-    setEditingGroupName(currentName)
-  }
-
-  const handleSaveGroupEdit = async () => {
-    if (!editingGroup || !editingGroupName.trim()) return
-
-    try {
-      setError("")
-      const updatedGroup = await updateGroupName(
-        editingGroup.checklistId,
-        editingGroup.groupId,
-        editingGroupName.trim(),
-      )
-
-      // Update local state
-      setChecklists(
-        checklists.map((checklist) =>
-          checklist.id === editingGroup.checklistId
-            ? {
-                ...checklist,
-                groups: checklist.groups.map((group) => (group.id === editingGroup.groupId ? updatedGroup : group)),
-              }
-            : checklist,
-        ),
-      )
-
-      setEditingGroup(null)
-      setEditingGroupName("")
-      setSuccess("Group name updated successfully")
-      setTimeout(() => setSuccess(""), 3000)
-    } catch (err) {
-      console.error("Error updating group name:", err)
-      setError("Failed to update group name")
-    }
-  }
-
-  const handleCancelGroupEdit = () => {
-    setEditingGroup(null)
-    setEditingGroupName("")
-  }
-
-  const getStatusBadgeClass = (status: string) => {
-    const statusOption = statusOptions.find((option) => option.label === status)
-    if (statusOption) {
-      switch (statusOption.color) {
-        case "gray":
-          return "bg-gray-100 text-gray-800 border-gray-200"
-        case "yellow":
-          return "bg-yellow-100 text-yellow-800 border-yellow-200"
-        case "blue":
-          return "bg-blue-100 text-blue-800 border-blue-200"
-        case "green":
-          return "bg-green-100 text-green-800 border-green-200"
-        case "red":
-          return "bg-red-100 text-red-800 border-red-200"
-        case "orange":
-          return "bg-orange-100 text-orange-800 border-orange-200"
-        case "purple":
-          return "bg-purple-100 text-purple-800 border-purple-200"
-        default:
-          return "bg-gray-100 text-gray-800 border-gray-200"
+      // Check permissions - affiliate users can only update their own affiliate's checklists
+      if (userProfile?.role?.toLowerCase() === 'affiliate') {
+        const checklist = checklists.find(c => c.id === checklistId)
+        if (checklist?.affiliate_id !== userProfile.affiliate_company_id) {
+          addNotification('warning', 'Permission Denied', 'You can only update checklists for your own affiliate.', 6000)
+          return
+        }
       }
-    }
 
-    // Fallback to intelligent detection for custom statuses
-    const lowerStatus = status.toLowerCase()
-    if (lowerStatus.includes("not started") || lowerStatus.includes("pending") || lowerStatus.includes("todo")) {
-      return "bg-gray-100 text-gray-800 border-gray-200"
-    } else if (lowerStatus.includes("progress") || lowerStatus.includes("working") || lowerStatus.includes("review")) {
-      return "bg-yellow-100 text-yellow-800 border-yellow-200"
-    } else if (lowerStatus.includes("completed") || lowerStatus.includes("done") || lowerStatus.includes("finished")) {
-      return "bg-green-100 text-green-800 border-green-200"
-    } else if (lowerStatus.includes("blocked") || lowerStatus.includes("issue") || lowerStatus.includes("problem")) {
-      return "bg-red-100 text-red-800 border-red-200"
-    } else if (lowerStatus.includes("approved") || lowerStatus.includes("verified")) {
-      return "bg-blue-100 text-blue-800 border-blue-200"
-    } else {
-      return "bg-purple-100 text-purple-800 border-purple-200"
-    }
-  }
-
-  const getStatusIcon = (status: string) => {
-    const lowerStatus = status.toLowerCase()
-    if (lowerStatus.includes("not started") || lowerStatus.includes("pending") || lowerStatus.includes("todo")) {
-      return <AlertCircle className="h-4 w-4" />
-    } else if (lowerStatus.includes("progress") || lowerStatus.includes("working") || lowerStatus.includes("review")) {
-      return <Clock className="h-4 w-4" />
-    } else if (lowerStatus.includes("completed") || lowerStatus.includes("done") || lowerStatus.includes("finished")) {
-      return <CheckCircle className="h-4 w-4" />
-    } else {
-      return <CheckSquare className="h-4 w-4" />
-    }
-  }
-
-  const getProgressStats = (checklist: AffiliateChecklist) => {
-    const totalItems = checklist.groups.reduce((sum, group) => sum + group.items.length, 0)
-
-    // Check for completed items using status options or fallback to text matching
-    const completedItems = checklist.groups.reduce(
-      (sum, group) =>
-        sum +
-        group.items.filter((item) => {
-          // First check if we have a status option that indicates completion
-          const statusOption = statusOptions.find((option) => option.label === item.status)
-          if (statusOption) {
-            // Consider green status as completed, or check for completion keywords in label
-            return (
-              statusOption.color === "green" ||
-              statusOption.label.toLowerCase().includes("completed") ||
-              statusOption.label.toLowerCase().includes("done") ||
-              statusOption.label.toLowerCase().includes("finished") ||
-              statusOption.label.toLowerCase().includes("approved")
-            )
+      await updateChecklistItem(checklistId, groupId, itemId, { status: newStatus })
+      
+      // Update local state
+      setChecklists(prev => prev.map(checklist => {
+        if (checklist.id === checklistId) {
+          return {
+            ...checklist,
+            groups: checklist.groups.map(group => {
+              if (group.id === groupId) {
+                return {
+                  ...group,
+                  items: group.items.map(item => {
+                    if (item.id === itemId) {
+                      return { ...item, status: newStatus }
+                    }
+                    return item
+                  })
+                }
+              }
+              return group
+            })
           }
+        }
+        return checklist
+      }))
 
-          // Fallback to text matching for custom statuses
-          const lowerStatus = item.status.toLowerCase()
-          return (
-            lowerStatus.includes("completed") ||
-            lowerStatus.includes("done") ||
-            lowerStatus.includes("finished") ||
-            lowerStatus.includes("approved") ||
-            lowerStatus.includes("received")
-          )
-        }).length,
-      0,
-    )
-
-    const inProgressItems = checklist.groups.reduce(
-      (sum, group) =>
-        sum +
-        group.items.filter((item) => {
-          // First check if we have a status option that indicates in progress
-          const statusOption = statusOptions.find((option) => option.label === item.status)
-          if (statusOption) {
-            // Consider yellow/orange status as in progress
-            return (
-              statusOption.color === "yellow" ||
-              statusOption.color === "orange" ||
-              statusOption.label.toLowerCase().includes("progress") ||
-              statusOption.label.toLowerCase().includes("working") ||
-              statusOption.label.toLowerCase().includes("review")
-            )
-          }
-
-          // Fallback to text matching
-          const lowerStatus = item.status.toLowerCase()
-          return (
-            lowerStatus.includes("progress") ||
-            lowerStatus.includes("working") ||
-            lowerStatus.includes("review") ||
-            lowerStatus.includes("pending")
-          )
-        }).length,
-      0,
-    )
-
-    return { totalItems, completedItems, inProgressItems }
-  }
-
-  const handleSelectItem = (itemId: string) => {
-    const newSelected = new Set(selectedItems)
-    if (newSelected.has(itemId)) {
-      newSelected.delete(itemId)
-    } else {
-      newSelected.add(itemId)
-    }
-    setSelectedItems(newSelected)
-  }
-
-  const handleSelectAllItems = (checklist: AffiliateChecklist) => {
-    const allItemIds = checklist.groups.flatMap((group) => group.items.map((item) => item.id))
-    if (selectedItems.size === allItemIds.length) {
-      setSelectedItems(new Set())
-    } else {
-      setSelectedItems(new Set(allItemIds))
+      addNotification('success', 'Status Updated', 'Status updated successfully!', 4000)
+    } catch (err) {
+      console.error("Error updating status:", err)
+      addNotification('error', 'Update Failed', 'Failed to update status. Please try again.', 6000)
     }
   }
 
-  const handleBulkStatusUpdate = async () => {
-    if (!bulkUpdateStatus || selectedItems.size === 0) {
-      setError("Please select items and a status")
+  const handleCreateChecklist = async () => {
+    if (!selectedAffiliateForChecklist || !selectedCashCallForChecklist) {
+      addNotification('warning', 'Selection Required', 'Please select both an affiliate and a cash call.', 5000)
+      return
+    }
+
+    // Check permissions - affiliate users can only create checklists for their own affiliate
+    if (userProfile?.role?.toLowerCase() === 'affiliate' && selectedAffiliateForChecklist.id !== userProfile.affiliate_company_id) {
+      addNotification('warning', 'Permission Denied', 'You can only create checklists for your own affiliate.', 6000)
       return
     }
 
     try {
-      setError("")
-      const activeChecklistData = checklists.find((c) => c.affiliate_id === activeTab)
-      if (!activeChecklistData) return
-
-      // Update all selected items
-      const updatePromises: Promise<any>[] = []
-
-      for (const itemId of selectedItems) {
-        for (const group of activeChecklistData.groups) {
-          const item = group.items.find((i) => i.id === itemId)
-          if (item) {
-            updatePromises.push(
-              updateChecklistItem(activeChecklistData.id, group.id, itemId, {
-                status: bulkUpdateStatus,
-              }),
-            )
+      // Get default items based on document requirements from settings
+      const getDefaultItems = async (templateType: 'CAPEX' | 'OPEX', affiliateId: string) => {
+        try {
+          // Get document requirements for this affiliate and cash call type
+          const cashCallType = templateType.toLowerCase() as 'opex' | 'capex'
+          const documentRequirements = await getDocumentRequirements(affiliateId, cashCallType)
+          
+          console.log('Debug - Document requirements for checklist:', {
+            affiliateId,
+            cashCallType,
+            requirementsCount: documentRequirements.length,
+            requirements: documentRequirements
+          })
+          
+          // Group requirements by committee - for now, assign all to aramcoDigital
+          // TODO: Add committee field to DocumentRequirement or create mapping logic
+          const groupedRequirements: {
+            aramcoDigital: string[]
+            businessProponent: string[]
+            secondTieredAffiliate: string[]
+          } = {
+            aramcoDigital: [],
+            businessProponent: [],
+            secondTieredAffiliate: []
+          }
+          
+          // Assign all document requirements to aramcoDigital committee for now
+          documentRequirements.forEach(req => {
+            groupedRequirements.aramcoDigital.push(req.id)
+          })
+          
+          console.log('Debug - Grouped requirements:', groupedRequirements)
+          
+          return groupedRequirements
+        } catch (error) {
+          console.error('Error getting document requirements for checklist:', error)
+          
+          // Fallback to hardcoded items if document requirements fail
+          if (templateType === 'CAPEX') {
+            return {
+              aramcoDigital: ["1", "2", "3", "4", "5"],
+              businessProponent: ["1", "2", "3", "4", "5", "6"],
+              secondTieredAffiliate: ["1", "2", "3", "4", "5", "6", "7", "8", "9"]
+            }
+          } else {
+            return {
+              aramcoDigital: ["1", "2", "3", "6"],
+              businessProponent: ["1", "2", "3", "4", "5", "7"],
+              secondTieredAffiliate: ["1", "2", "3", "4", "5", "6", "7", "8", "9"]
+            }
           }
         }
       }
 
-      await Promise.all(updatePromises)
+      const defaultItems = await getDefaultItems(checklistTemplateType, selectedAffiliateForChecklist.id)
+      
+      const newChecklist = await createAffiliateChecklist(
+        selectedAffiliateForChecklist.id,
+        `${selectedAffiliateForChecklist.name} - ${selectedCashCallForChecklist.call_number}`,
+        defaultItems,
+        checklistTemplateType,
+        selectedCashCallForChecklist.id
+      )
 
-      // Reload data to reflect changes
-      await loadData()
-
-      setSelectedItems(new Set())
-      setIsBulkUpdateOpen(false)
-      setBulkUpdateStatus("")
-      setSuccess(`Updated ${selectedItems.size} items successfully`)
-      setTimeout(() => setSuccess(""), 3000)
+      setChecklists(prev => [...prev, newChecklist])
+      setIsCreateChecklistOpen(false)
+      setSelectedAffiliateForChecklist(null)
+      setSelectedCashCallForChecklist(null)
+      setChecklistTemplateType('CAPEX')
+      addNotification('success', 'Checklist Created', `Checklist created successfully for ${selectedAffiliateForChecklist.name} - Cash Call ${selectedCashCallForChecklist.call_number}!`, 6000)
     } catch (err) {
-      console.error("Error bulk updating items:", err)
-      setError("Failed to update items")
+      console.error("Error creating checklist:", err)
+      addNotification('error', 'Creation Failed', 'Failed to create checklist. Please try again.', 6000)
     }
   }
 
-  // Get available affiliates that don't have checklists yet
-  const availableAffiliates = affiliates.filter(
-    (affiliate) => !checklists.some((checklist) => checklist.affiliate_id === affiliate.id),
-  )
+  const handleDeleteChecklist = async (checklistId: string, checklistName: string) => {
+    try {
+      console.log('Delete checklist attempt:', {
+        checklistId,
+        checklistName,
+        userRole: userProfile?.role,
+        userAffiliate: userProfile?.affiliate_company_id
+      })
+
+      // Check permissions - affiliate users can only delete their own affiliate's checklists
+      if (userProfile?.role?.toLowerCase() === 'affiliate') {
+        const checklist = checklists.find(c => c.id === checklistId)
+        if (checklist?.affiliate_id !== userProfile.affiliate_company_id) {
+          addNotification('warning', 'Permission Denied', 'You can only delete checklists for your own affiliate.', 6000)
+          return
+        }
+      }
+
+      console.log('Proceeding with deletion...')
+      await deleteAffiliateChecklist(checklistId)
+      
+      // Update local state
+      setChecklists(prev => prev.filter(checklist => checklist.id !== checklistId))
+      
+      addNotification('success', 'Checklist Deleted', `Checklist "${checklistName}" deleted successfully!`, 5000)
+    } catch (err) {
+      console.error("Error deleting checklist:", err)
+      addNotification('error', 'Deletion Failed', 'Failed to delete checklist. Please try again.', 6000)
+    }
+  }
+
+  const toggleChecklistExpansion = (checklistId: string) => {
+    setExpandedChecklists(prev => {
+      const newSet = new Set(prev)
+      if (newSet.has(checklistId)) {
+        newSet.delete(checklistId)
+      } else {
+        newSet.add(checklistId)
+      }
+      return newSet
+    })
+  }
+
+  const expandAllChecklists = () => {
+    const allKeys = new Set<string>()
+    
+    // Add all affiliate keys
+    Object.keys(filteredGroupedChecklists).forEach(affiliateId => {
+      allKeys.add(`affiliate-${affiliateId}`)
+    })
+    
+    // Add all checklist keys
+    Object.entries(filteredGroupedChecklists).forEach(([affiliateId, affiliateData]) => {
+      affiliateData.checklists.forEach(checklist => {
+        allKeys.add(`checklist-${checklist.id}`)
+      })
+    })
+    
+    setExpandedChecklists(allKeys)
+  }
+
+  const collapseAllChecklists = () => {
+    setExpandedChecklists(new Set())
+  }
+
+  const toggleBulkMode = () => {
+    setBulkMode(!bulkMode)
+    if (bulkMode) {
+      setSelectedChecklists(new Set())
+    }
+  }
+
+  const selectAllChecklists = () => {
+    const allChecklistIds = new Set(checklists.map(checklist => checklist.id))
+    setSelectedChecklists(allChecklistIds)
+  }
+
+  const clearAllSelections = () => {
+    setSelectedChecklists(new Set())
+  }
+
+  const toggleChecklistSelection = (checklistId: string) => {
+    setSelectedChecklists(prev => {
+      const newSet = new Set(prev)
+      if (newSet.has(checklistId)) {
+        newSet.delete(checklistId)
+      } else {
+        newSet.add(checklistId)
+      }
+      return newSet
+    })
+  }
+
+  const deleteSelectedChecklists = async () => {
+    if (selectedChecklists.size === 0) {
+      addNotification('warning', 'No Selection', 'Please select checklists to delete.', 4000)
+      return
+    }
+
+    const selectedChecklistNames = checklists
+      .filter(checklist => selectedChecklists.has(checklist.id))
+      .map(checklist => checklist.affiliate_name)
+
+    if (confirm(`Are you sure you want to delete these ${selectedChecklists.size} checklists?\n\n${selectedChecklistNames.join('\n')}\n\nThis action cannot be undone.`)) {
+      try {
+        await Promise.all(
+          Array.from(selectedChecklists).map(checklistId => 
+            deleteAffiliateChecklist(checklistId)
+          )
+        )
+        
+        setChecklists(prev => prev.filter(checklist => !selectedChecklists.has(checklist.id)))
+        setSelectedChecklists(new Set())
+        setBulkMode(false)
+        
+        addNotification('success', 'Bulk Delete Complete', `Successfully deleted ${selectedChecklists.size} checklists.`, 8000)
+      } catch (err) {
+        console.error('Bulk delete error:', err)
+        addNotification('error', 'Bulk Delete Failed', 'Some checklists could not be deleted. Please try again.', 8000)
+      }
+    }
+  }
+
+  const getCashCallsForAffiliate = (affiliateId: string) => {
+    return cashCalls.filter(cashCall => 
+      cashCall.affiliate_id === affiliateId
+    )
+  }
+
+  const getAvailableCashCallsForAffiliate = (affiliateId: string) => {
+    const affiliateCashCalls = getCashCallsForAffiliate(affiliateId)
+    const usedCashCallIds = checklists
+      .filter(checklist => checklist.affiliate_id === affiliateId)
+      .map(checklist => checklist.cash_call_id)
+      .filter(Boolean)
+
+    return affiliateCashCalls.filter(cashCall => !usedCashCallIds.includes(cashCall.id))
+  }
+
+  const getStatusBadgeClass = (status: string) => {
+    const option = statusOptions.find(opt => opt.label === status)
+    if (!option) return "bg-gray-100 text-gray-800"
+    
+    switch (option.color) {
+      case "green": return "bg-green-100 text-green-800"
+      case "yellow": return "bg-yellow-100 text-yellow-800"
+      case "red": return "bg-red-100 text-red-800"
+      case "blue": return "bg-blue-100 text-blue-800"
+      default: return "bg-gray-100 text-gray-800"
+    }
+  }
+
+  const getStatusIcon = (status: string) => {
+    const option = statusOptions.find(opt => opt.label === status)
+    if (!option) return <Clock className="h-3 w-3" />
+    
+    switch (option.color) {
+      case "green": return <CheckCircle className="h-3 w-3" />
+      case "yellow": return <AlertCircle className="h-3 w-3" />
+      case "red": return <X className="h-3 w-3" />
+      case "blue": return <Clock className="h-3 w-3" />
+      default: return <Clock className="h-3 w-3" />
+    }
+  }
+
+  // Group checklists by company (affiliate) only
+  const groupedChecklists = checklists.reduce((acc, checklist) => {
+    const affiliateId = checklist.affiliate_id
+    
+    if (!acc[affiliateId]) {
+      acc[affiliateId] = {
+        affiliate: affiliates.find(a => a.id === affiliateId),
+        checklists: []
+      }
+    }
+    
+    acc[affiliateId].checklists.push(checklist)
+    return acc
+  }, {} as Record<string, {
+    affiliate: Affiliate | undefined,
+    checklists: AffiliateChecklist[]
+  }>)
+
+  const filteredGroupedChecklists = Object.entries(groupedChecklists)
+    .filter(([affiliateId, data]) => {
+      const matchesSearch = data.affiliate?.name.toLowerCase().includes(searchTerm.toLowerCase()) || false
+      const matchesFilter = affiliateFilter === "all" || affiliateId === affiliateFilter
+      return matchesSearch && matchesFilter
+    })
+    .reduce((acc, [affiliateId, data]) => {
+      acc[affiliateId] = data
+      return acc
+    }, {} as typeof groupedChecklists)
+
+  // Show loading while authentication is being determined
+  if (!user || !userProfile) {
+    return <AnimatedLoading message="Loading authentication..." />
+  }
 
   if (isLoading) {
-    return <AnimatedLoading message="Loading Checklists..." />
+    return <AnimatedLoading message="Loading checklists..." />
   }
-
-  if (!user) {
-    return null
-  }
-
-  const activeChecklist = checklists.find((c) => c.affiliate_id === activeTab)
 
   return (
-    <ErrorBoundary>
+    <>
+      <style jsx>{`
+        @keyframes slideInRight {
+          from {
+            transform: translateX(100%);
+            opacity: 0;
+          }
+          to {
+            transform: translateX(0);
+            opacity: 1;
+          }
+        }
+        
+        @keyframes slideOutRight {
+          from {
+            transform: translateX(0);
+            opacity: 1;
+          }
+          to {
+            transform: translateX(100%);
+            opacity: 0;
+          }
+        }
+      `}</style>
       <TooltipProvider>
-        <div className="min-h-screen bg-gradient-to-br from-gray-50 to-white">
-          {/* Header */}
-          <header className="bg-white/80 backdrop-blur-md border-b border-gray-200 sticky top-0 z-40">
-            <div className="px-6 py-4 flex justify-between items-center">
-              <div className="flex items-center gap-6">
-                <Image
-                  src="/images/aramco-digital-new.png"
-                  alt="Aramco Digital"
-                  width={200}
-                  height={60}
-                  className="h-10 w-auto"
-                />
-                <div>
-                  <h1 className="text-2xl font-bold bg-gradient-to-r from-[#0033A0] to-[#00A3E0] bg-clip-text text-transparent flex items-center gap-2">
-                    {activeTab && (
-                      <Button
-                        onClick={() => setActiveTab("")}
-                        variant="ghost"
-                        size="sm"
-                        className="p-0 h-auto text-[#0033A0] hover:text-[#00A3E0] hover:bg-transparent"
+      <div className="min-h-screen bg-gradient-to-br from-gray-50 to-white">
+        {/* Header */}
+        <header className="bg-white/80 backdrop-blur-md border-b border-gray-200 sticky top-0 z-40">
+          <div className="px-6 py-4 flex justify-between items-center">
+            <div className="flex items-center gap-6">
+              <Image
+                src="/images/aramco-digital-new.png"
+                alt="Aramco Digital"
+                width={200}
+                height={60}
+                className="h-10 w-auto"
+              />
+              <div>
+                <h1 className="text-2xl font-bold bg-gradient-to-r from-[#0033A0] to-[#00A3E0] bg-clip-text text-transparent flex items-center gap-2">
+                  Affiliate Checklist Management
+                </h1>
+                <p className="text-gray-600">
+                  Welcome back, {userProfile?.full_name || user?.email} •{" "}
+                  {userProfile?.role ? userProfile.role.charAt(0).toUpperCase() + userProfile.role.slice(1) : 'User'}
+                </p>
+              </div>
+            </div>
+            <div className="flex items-center gap-2">
+              <AdminSettings currentUser={userProfile} onDataChange={loadData} />
+              {userProfile?.role === 'admin' && (
+                <Button
+                  onClick={() => router.push('/manage-roles')}
+                  variant="outline"
+                  size="sm"
+                  className="border-[#0033A0] text-[#0033A0] hover:bg-[#0033A0]/10 bg-transparent"
+                >
+                  <Shield className="h-4 w-4 mr-2" />
+                  Manage Roles
+                </Button>
+              )}
+              <Button
+                onClick={handleRefresh}
+                variant="outline"
+                size="sm"
+                className="border-[#0033A0] text-[#0033A0] hover:bg-[#0033A0]/10 bg-transparent"
+                disabled={isRefreshing || isLoading}
+              >
+                <RefreshCw className={`h-4 w-4 mr-2 ${isRefreshing ? "animate-spin" : ""}`} />
+                {isRefreshing ? "Refreshing..." : "Refresh"}
+              </Button>
+              <Button
+                onClick={() => router.push("/dashboard")}
+                variant="outline"
+                size="sm"
+                className="border-[#0033A0] text-[#0033A0] hover:bg-[#0033A0]/10 bg-transparent"
+              >
+                Dashboard
+              </Button>
+              <Button
+                onClick={handleLogout}
+                className="border border-[#0033A0] text-[#0033A0] hover:bg-[#0033A0]/10 bg-transparent enhanced-button"
+              >
+                <LogOut className="h-4 w-4 mr-2" />
+                Logout
+              </Button>
+            </div>
+          </div>
+        </header>
+
+        {/* Enhanced Notifications */}
+        <div className="fixed top-20 right-4 z-50 space-y-2 max-w-sm">
+          {notifications.map((notification) => {
+            const getNotificationStyles = () => {
+              switch (notification.type) {
+                case 'success':
+                  return 'bg-green-50 border-green-200 text-green-800'
+                case 'error':
+                  return 'bg-red-50 border-red-200 text-red-800'
+                case 'warning':
+                  return 'bg-yellow-50 border-yellow-200 text-yellow-800'
+                case 'info':
+                  return 'bg-blue-50 border-blue-200 text-blue-800'
+                default:
+                  return 'bg-gray-50 border-gray-200 text-gray-800'
+              }
+            }
+
+            const getIcon = () => {
+              switch (notification.type) {
+                case 'success':
+                  return <CheckCircle className="h-5 w-5 text-green-500" />
+                case 'error':
+                  return <AlertCircle className="h-5 w-5 text-red-500" />
+                case 'warning':
+                  return <AlertCircle className="h-5 w-5 text-yellow-500" />
+                case 'info':
+                  return <AlertCircle className="h-5 w-5 text-blue-500" />
+                default:
+                  return <AlertCircle className="h-5 w-5 text-gray-500" />
+              }
+            }
+
+            return (
+              <div
+                key={notification.id}
+                className={`p-4 rounded-lg border shadow-lg transform transition-all duration-300 ease-in-out ${getNotificationStyles()}`}
+                style={{
+                  animation: 'slideInRight 0.3s ease-out'
+                }}
+              >
+                <div className="flex items-start gap-3">
+                  {getIcon()}
+                  <div className="flex-1 min-w-0">
+                    <h4 className="font-semibold text-sm mb-1">{notification.title}</h4>
+                    <p className="text-sm opacity-90">{notification.message}</p>
+                    {notification.action && (
+                      <button
+                        onClick={notification.action.onClick}
+                        className="mt-2 text-sm font-medium underline hover:no-underline"
                       >
-                        <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
-                        </svg>
-                      </Button>
+                        {notification.action.label}
+                      </button>
                     )}
-                    {activeTab ? 'Checklist Details' : 'Affiliate Checklist Management'}
-                  </h1>
-                  <p className="text-gray-600">
-                    Welcome back, {user.full_name || user.email} •{" "}
-                    {user.role?.charAt(0).toUpperCase() + user.role?.slice(1)}
-                  </p>
-                </div>
-              </div>
-              <div className="flex items-center gap-2">
-                <AdminSettings currentUser={user} />
-                <Button
-                  onClick={handleRefresh}
-                  variant="outline"
-                  size="sm"
-                  className="border-[#0033A0] text-[#0033A0] hover:bg-[#0033A0]/10 bg-transparent"
-                  disabled={isRefreshing}
-                >
-                  <RefreshCw className={`h-4 w-4 mr-2 ${isRefreshing ? "animate-spin" : ""}`} />
-                  Refresh
-                </Button>
-                <Button
-                  onClick={() => router.push("/dashboard")}
-                  variant="outline"
-                  size="sm"
-                  className="border-[#0033A0] text-[#0033A0] hover:bg-[#0033A0]/10 bg-transparent"
-                >
-                  Dashboard
-                </Button>
-                <Button
-                  onClick={handleLogout}
-                  className="border border-[#0033A0] text-[#0033A0] hover:bg-[#0033A0]/10 bg-transparent enhanced-button"
-                >
-                  <LogOut className="h-4 w-4 mr-2" />
-                  Logout
-                </Button>
-              </div>
-            </div>
-          </header>
-
-          {/* Error/Success Messages */}
-          {error && (
-            <div className="mx-6 mt-6 mb-4">
-              <div className="p-4 bg-red-500/10 border border-red-500/20 rounded-lg">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    <AlertCircle className="h-4 w-4 text-red-400" />
-                    <p className="text-red-400 text-sm">{error}</p>
                   </div>
                   <Button
-                    onClick={() => setError("")}
+                    onClick={() => removeNotification(notification.id)}
                     variant="ghost"
                     size="sm"
-                    className="text-red-400 hover:text-red-300"
+                    className="h-6 w-6 p-0 opacity-60 hover:opacity-100"
                   >
-                    ×
+                    <X className="h-3 w-3" />
                   </Button>
                 </div>
               </div>
-            </div>
-          )}
+            )
+          })}
+        </div>
 
-          {success && (
-            <div className="mx-6 mt-6 mb-4">
-              <div className="p-4 bg-green-500/10 border border-green-500/20 rounded-lg">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    <CheckCircle className="h-4 w-4 text-green-400" />
-                    <p className="text-green-400 text-sm">{success}</p>
-                  </div>
+        {/* Clear All Notifications Button */}
+        {notifications.length > 0 && (
+          <div className="fixed top-4 right-4 z-50">
+            <Button
+              onClick={clearAllNotifications}
+              variant="outline"
+              size="sm"
+              className="bg-white/80 backdrop-blur-sm border-gray-300 text-gray-600 hover:bg-white"
+            >
+              Clear All ({notifications.length})
+            </Button>
+          </div>
+        )}
+
+        {/* Main Content */}
+        <div className="px-6 py-6">
+          {isLoading ? (
+            <div className="text-center py-12">
+              <div className="max-w-md mx-auto">
+                <RefreshCw className="h-16 w-16 text-gray-400 mx-auto mb-4 animate-spin" />
+                <h3 className="text-lg font-medium text-gray-900 mb-2">Loading Checklists</h3>
+                <p className="text-gray-600">
+                  Please wait while we load your checklist data...
+                </p>
+              </div>
+            </div>
+          ) : checklists.length === 0 ? (
+            <div className="text-center py-12">
+              <div className="max-w-md mx-auto">
+                <CheckSquare className="h-16 w-16 text-gray-400 mx-auto mb-4" />
+                <h3 className="text-lg font-medium text-gray-900 mb-2">No Checklists Yet</h3>
+                <p className="text-gray-600 mb-6">
+                  {cashCalls.length > 0 
+                    ? "Create your first checklist to start managing affiliate requirements."
+                    : "No cash calls available. Please create cash calls first before creating checklists."
+                  }
+                </p>
+                {cashCalls.length > 0 && (userProfile?.role?.toLowerCase() === 'admin' || userProfile?.role?.toLowerCase() === 'approver' || userProfile?.role?.toLowerCase() === 'affiliate') && (
                   <Button
-                    onClick={() => setSuccess("")}
-                    variant="ghost"
-                    size="sm"
-                    className="text-green-400 hover:text-green-300"
+                    onClick={() => setIsCreateChecklistOpen(true)}
+                    className="aramco-button-primary"
                   >
-                    ×
+                    <Plus className="h-4 w-4 mr-2" />
+                    Create First Checklist
                   </Button>
-                </div>
+                )}
               </div>
             </div>
-          )}
-
-          <div className="p-6">
-            {/* Show loading state while refreshing */}
-            {isRefreshing && (
-              <div className="mb-6">
-                <div className="flex items-center justify-center p-8">
-                  <RefreshCw className="h-6 w-6 animate-spin text-[#0033A0] mr-2" />
-                  <span className="text-[#0033A0]">Loading data...</span>
-                </div>
-              </div>
-            )}
-
-            {/* Rest of the component content remains the same */}
-            {/* Stats Cards */}
-            {activeChecklist && (
-              <div className="grid grid-cols-1 md:grid-cols-4 gap-6 mb-8">
-                {(() => {
-                  const stats = getProgressStats(activeChecklist)
-                  const progressPercentage = stats.totalItems > 0 ? (stats.completedItems / stats.totalItems) * 100 : 0
-
-                  return (
-                    <>
-                      <Card className="aramco-card-bg border-l-4 border-l-[#0033A0] hover:scale-105 transition-all duration-300">
-                        <CardHeader className="pb-2 flex flex-row items-center justify-between">
-                          <CardTitle className="text-sm font-medium text-gray-600">Total Items</CardTitle>
-                          <CheckSquare className="h-4 w-4 text-[#0033A0]" />
-                        </CardHeader>
-                        <CardContent>
-                          <div className="text-3xl font-bold text-[#0033A0]">{stats.totalItems}</div>
-                        </CardContent>
-                      </Card>
-
-                      <Card className="aramco-card-bg border-l-4 border-l-[#00A3E0] hover:scale-105 transition-all duration-300">
-                        <CardHeader className="pb-2 flex flex-row items-center justify-between">
-                          <CardTitle className="text-sm font-medium text-gray-600">In Progress</CardTitle>
-                          <Clock className="h-4 w-4 text-[#00A3E0]" />
-                        </CardHeader>
-                        <CardContent>
-                          <div className="text-3xl font-bold text-[#00A3E0]">{stats.inProgressItems}</div>
-                        </CardContent>
-                      </Card>
-
-                      <Card className="aramco-card-bg border-l-4 border-l-[#00843D] hover:scale-105 transition-all duration-300">
-                        <CardHeader className="pb-2 flex flex-row items-center justify-between">
-                          <CardTitle className="text-sm font-medium text-gray-600">Completed</CardTitle>
-                          <CheckCircle className="h-4 w-4 text-[#00843D]" />
-                        </CardHeader>
-                        <CardContent>
-                          <div className="text-3xl font-bold text-[#00843D]">{stats.completedItems}</div>
-                        </CardContent>
-                      </Card>
-
-                      <Card className="aramco-card-bg border-l-4 border-l-[#84BD00] hover:scale-105 transition-all duration-300">
-                        <CardHeader className="pb-2 flex flex-row items-center justify-between">
-                          <CardTitle className="text-sm font-medium text-gray-600">Progress</CardTitle>
-                          <CheckSquare className="h-4 w-4 text-[#84BD00]" />
-                        </CardHeader>
-                        <CardContent>
-                          <div className="text-3xl font-bold text-[#84BD00]">{Math.round(progressPercentage)}%</div>
-                        </CardContent>
-                      </Card>
-                    </>
-                  )
-                })()}
-              </div>
-            )}
-
-            {/* Main Content */}
-            <Card className="aramco-card-bg">
-              <CardHeader>
-                {/* Search and Filter Controls */}
-                <div className="mb-6 space-y-4">
-                  {/* View Mode Toggle */}
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-4">
-                      <div className="flex items-center gap-2">
-                        <Button
-                          variant={viewMode === 'tabs' ? 'default' : 'outline'}
-                          size="sm"
-                          onClick={() => setViewMode('tabs')}
-                          className="bg-[#0033A0] hover:bg-[#0033A0]/80 text-white"
-                        >
-                          Tab View
-                        </Button>
-                        <Button
-                          variant={viewMode === 'stacked' ? 'default' : 'outline'}
-                          size="sm"
-                          onClick={() => setViewMode('stacked')}
-                          className="bg-[#0033A0] hover:bg-[#0033A0]/80 text-white"
-                        >
-                          Stacked View
-                        </Button>
-                      </div>
-                      <div className="text-sm text-gray-600">
-                        {filteredChecklists.length} of {checklists.length} checklists
-                      </div>
-                    </div>
-                    <Button
-                      onClick={clearFilters}
-                      variant="outline"
-                      size="sm"
-                      className="border-gray-400 text-gray-600 hover:bg-gray-100"
-                    >
-                      Clear Filters
-                    </Button>
+          ) : (
+            <>
+              {/* Controls */}
+              <div className="mb-6 space-y-4">
+                {/* Loading indicator for controls */}
+                {isLoading && (
+                  <div className="flex items-center gap-2 text-sm text-gray-500">
+                    <RefreshCw className="h-4 w-4 animate-spin" />
+                    Loading data...
                   </div>
-
-                  {/* Search and Filter Row */}
-                  <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                    <div>
-                      <Label className="text-sm font-medium text-gray-700 mb-2 block">Search</Label>
+                )}
+                {/* Search and Filters */}
+                                  <div className="flex flex-col sm:flex-row gap-4">
+                    <div className="flex-1">
                       <Input
-                        placeholder="Search checklists, groups, or items..."
+                        placeholder="Search checklists..."
                         value={searchTerm}
                         onChange={(e) => setSearchTerm(e.target.value)}
-                        className="w-full"
+                        className="max-w-md"
+                        disabled={isLoading}
                       />
                     </div>
-                    <div>
-                      <Label className="text-sm font-medium text-gray-700 mb-2 block">Affiliate</Label>
-                      <Select value={affiliateFilter} onValueChange={setAffiliateFilter}>
-                        <SelectTrigger className="w-full">
-                          <SelectValue placeholder="All affiliates" />
+                    <div className="flex gap-2">
+                      <Select value={affiliateFilter} onValueChange={setAffiliateFilter} disabled={isLoading}>
+                        <SelectTrigger className="w-48">
+                          <SelectValue />
                         </SelectTrigger>
                         <SelectContent>
                           <SelectItem value="all">All Affiliates</SelectItem>
-                          {affiliates.map(affiliate => (
-                            <SelectItem key={affiliate.id} value={affiliate.id}>
-                              {affiliate.name}
-                            </SelectItem>
-                          ))}
+                          {affiliates
+                            .filter(affiliate => 
+                              userProfile?.role?.toLowerCase() !== 'affiliate' || 
+                              affiliate.id === userProfile?.affiliate_company_id
+                            )
+                            .map((affiliate) => (
+                              <SelectItem key={affiliate.id} value={affiliate.id}>
+                                {affiliate.name}
+                              </SelectItem>
+                            ))}
                         </SelectContent>
                       </Select>
                     </div>
-                    <div className="flex items-end">
-                      <Button
-                        onClick={handleRefresh}
-                        disabled={isRefreshing}
-                        className="w-full bg-[#00A3E0] hover:bg-[#0033A0] text-white"
-                      >
-                        <RefreshCw className={`h-4 w-4 mr-2 ${isRefreshing ? 'animate-spin' : ''}`} />
-                        Refresh
-                      </Button>
-                    </div>
                   </div>
-                </div>
 
-                                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-                  <CardTitle className="text-[#0033A0] text-xl flex items-center gap-2">
-                    <CheckSquare className="h-5 w-5" />
-                    Affiliate Checklists
-                  </CardTitle>
-                  {user.role === "admin" && (
-                    <div className="flex flex-col sm:flex-row gap-2">
-                      {checklists.length > 0 && (
-                        <AlertDialog open={isStandardizeOpen} onOpenChange={setIsStandardizeOpen}>
-                          <AlertDialogTrigger asChild>
-                            <Button
-                              variant="outline"
-                              size="sm"
-                              className="border-[#84BD00] text-[#84BD00] hover:bg-[#84BD00]/10 bg-transparent"
-                            >
-                              <Sync className="h-4 w-4 mr-2" />
-                              Standardize All
-                            </Button>
-                          </AlertDialogTrigger>
-                          <AlertDialogContent className="aramco-card-bg">
-                            <AlertDialogHeader>
-                              <AlertDialogTitle className="text-white">Standardize All Checklists</AlertDialogTitle>
-                              <div className="text-white/80 space-y-4">
-                                <div>
-                                  This will update all existing checklists to use the original standardized items.
-                                </div>
-
-                                <div>
-                                  <div className="font-semibold text-white mb-2">Aramco Digital Company:</div>
-                                  <div className="space-y-1 text-sm ml-4">
-                                    <div>• Corporate Registration Certificate</div>
-                                    <div>• Tax Registration Documents</div>
-                                    <div>• Financial Statements (Last 3 Years)</div>
-                                    <div>• Board Resolution for Partnership</div>
-                                  </div>
-                                </div>
-
-                                <div>
-                                  <div className="font-semibold text-white mb-2">
-                                    Business Proponent - T&I Affiliate Affairs:
-                                  </div>
-                                  <div className="space-y-1 text-sm ml-4">
-                                    <div>• Business Plan & Strategy Document</div>
-                                    <div>• Technology Transfer Agreement</div>
-                                    <div>• Intellectual Property Documentation</div>
-                                    <div>• Innovation & Development Roadmap</div>
-                                  </div>
-                                </div>
-
-                                <div>
-                                  <div className="font-semibold text-white mb-2">2nd Tiered Affiliate - NextEra:</div>
-                                  <div className="space-y-1 text-sm ml-4">
-                                    <div>• Energy Partnership Agreement</div>
-                                    <div>• Renewable Energy Certificates</div>
-                                    <div>• Environmental Impact Assessment</div>
-                                    <div>• Grid Integration Technical Specs</div>
-                                  </div>
-                                </div>
-
-                                <div className="text-yellow-400 font-semibold">
-                                  Warning: This will replace all existing items in all checklists. This action cannot
-                                  be undone.
-                                </div>
-                              </div>
-                            </AlertDialogHeader>
-                            <AlertDialogFooter>
-                              <AlertDialogCancel className="border-gray-400 text-gray-300 hover:bg-gray-700">
-                                Cancel
-                              </AlertDialogCancel>
-                              <AlertDialogAction
-                                onClick={handleStandardizeChecklists}
-                                className="bg-[#84BD00] hover:bg-[#84BD00]/80 text-white"
-                              >
-                                Standardize All Checklists
-                              </AlertDialogAction>
-                            </AlertDialogFooter>
-                          </AlertDialogContent>
-                        </AlertDialog>
-                      )}
-
-                      {activeChecklist && (
-                        <>
-                          <Dialog open={isRenameOpen} onOpenChange={setIsRenameOpen}>
-                            <DialogTrigger asChild>
-                              <Button
-                                variant="outline"
-                                size="sm"
-                                className="border-[#00A3E0] text-[#00A3E0] hover:bg-[#00A3E0]/10 bg-transparent"
-                                onClick={() => setNewAffiliateName(activeChecklist.affiliate_name)}
-                              >
-                                <Edit className="h-4 w-4 mr-2" />
-                                Rename
-                              </Button>
-                            </DialogTrigger>
-                            <DialogContent className="aramco-card-bg">
-                              <DialogHeader>
-                                <DialogTitle className="text-white">Rename Affiliate</DialogTitle>
-                                <DialogDescription className="text-white/80">
-                                  Enter a new name for this affiliate checklist.
-                                </DialogDescription>
-                              </DialogHeader>
-                              <div className="space-y-4">
-                                <div>
-                                  <Label className="text-white">Affiliate Name</Label>
-                                  <Input
-                                    value={newAffiliateName}
-                                    onChange={(e) => setNewAffiliateName(e.target.value)}
-                                    placeholder="Enter affiliate name"
-                                    className="enhanced-input"
-                                  />
-                                </div>
-                                <div className="flex gap-2">
-                                  <Button onClick={handleRenameAffiliate} className="aramco-button-primary text-white">
-                                    <Save className="h-4 w-4 mr-2" />
-                                    Save
-                                  </Button>
-                                  <Button
-                                    onClick={() => setIsRenameOpen(false)}
-                                    variant="outline"
-                                    className="border-gray-400 text-gray-300 hover:bg-gray-700"
-                                  >
-                                    Cancel
-                                  </Button>
-                                </div>
-                              </div>
-                            </DialogContent>
-                          </Dialog>
-
+                {/* Actions */}
+                <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
+                  <div className="flex items-center gap-2">
+                    <Button
+                      onClick={expandAllChecklists}
+                      variant="outline"
+                      size="sm"
+                      disabled={isLoading}
+                    >
+                      Expand All
+                    </Button>
+                    <Button
+                      onClick={collapseAllChecklists}
+                      variant="outline"
+                      size="sm"
+                      disabled={isLoading}
+                    >
+                      Collapse All
+                    </Button>
+                    {userProfile?.role?.toLowerCase() === 'admin' && checklists.length > 0 && (
+                      <Button
+                        onClick={toggleBulkMode}
+                        variant={bulkMode ? "default" : "outline"}
+                        size="sm"
+                        className={bulkMode ? "bg-red-600 hover:bg-red-700" : "border-red-400 text-red-400 hover:bg-red-500/10"}
+                        disabled={isLoading}
+                      >
+                        {bulkMode ? "Exit Bulk Mode" : "Bulk Delete Mode"}
+                      </Button>
+                    )}
+                  </div>
+                  <div className="flex items-center gap-2">
+                    {bulkMode && userProfile?.role?.toLowerCase() === 'admin' && (
+                      <>
+                        <Button
+                          onClick={selectAllChecklists}
+                          variant="outline"
+                          size="sm"
+                          disabled={isLoading}
+                        >
+                          Select All ({checklists.length})
+                        </Button>
+                        <Button
+                          onClick={clearAllSelections}
+                          variant="outline"
+                          size="sm"
+                          disabled={isLoading}
+                        >
+                          Clear All
+                        </Button>
+                        <Button
+                          onClick={deleteSelectedChecklists}
+                          variant="destructive"
+                          size="sm"
+                          disabled={isLoading || selectedChecklists.size === 0}
+                        >
+                          <Trash2 className="h-4 w-4 mr-2" />
+                          Delete Selected ({selectedChecklists.size})
+                        </Button>
+                      </>
+                    )}
+                    {(userProfile?.role?.toLowerCase() === 'admin' || userProfile?.role?.toLowerCase() === 'approver' || userProfile?.role?.toLowerCase() === 'affiliate') && (
+                      <Button
+                        onClick={() => setIsCreateChecklistOpen(true)}
+                        className="aramco-button-primary"
+                        disabled={isLoading}
+                      >
+                        <Plus className="h-4 w-4 mr-2" />
+                        Create New Checklist
+                      </Button>
+                    )}
+                    {userProfile?.role?.toLowerCase() === 'admin' && checklists.length > 0 && (
+                      <Tooltip>
+                        <TooltipTrigger asChild>
                           <Button
-                            onClick={() => handleDeleteAffiliate(activeChecklist.id)}
                             variant="outline"
                             size="sm"
-                            className="border-red-400 text-red-400 hover:bg-red-500/10 bg-transparent"
+                            className="border-red-400 text-red-400 hover:bg-red-500/10"
+                            disabled={isLoading}
+                            onClick={() => {
+                              if (confirm(`Are you sure you want to delete ALL ${checklists.length} checklists? This action cannot be undone.`)) {
+                                // Bulk delete all checklists
+                                Promise.all(checklists.map(checklist => 
+                                  deleteAffiliateChecklist(checklist.id)
+                                )).then(() => {
+                                  setChecklists([])
+                                  addNotification('success', 'Bulk Delete Complete', `Successfully deleted ${checklists.length} checklists.`, 8000)
+                                }).catch(err => {
+                                  console.error('Bulk delete error:', err)
+                                  addNotification('error', 'Bulk Delete Failed', 'Some checklists could not be deleted. Please try again.', 8000)
+                                })
+                              }
+                            }}
                           >
                             <Trash2 className="h-4 w-4 mr-2" />
-                            Delete
+                            Delete All
                           </Button>
-                        </>
-                      )}
+                        </TooltipTrigger>
+                        <TooltipContent>
+                          <p>Delete all checklists (Admin only)</p>
+                        </TooltipContent>
+                      </Tooltip>
+                    )}
+                  </div>
+                </div>
+              </div>
 
-                      <Dialog open={isAddAffiliateOpen} onOpenChange={setIsAddAffiliateOpen}>
-                        <DialogTrigger asChild>
-                          <Button className="aramco-button-primary text-white enhanced-button">
-                            <Plus className="h-4 w-4 mr-2" />
-                            Add Affiliate
-                          </Button>
-                        </DialogTrigger>
-                        <DialogContent className="aramco-card-bg">
-                          <DialogHeader>
-                            <DialogTitle className="text-white">Add Affiliate Checklist</DialogTitle>
-                            <div className="text-white/80 space-y-4">
-                              <div>
-                                Select an affiliate to create a new checklist. The new checklist will copy all current
-                                items from the existing NextEra checklist.
-                              </div>
+              {/* Checklists Display */}
+              <div className="space-y-6">
+                  {Object.entries(filteredGroupedChecklists).map(([affiliateId, affiliateData]) => {
+                    const isAffiliateExpanded = expandedChecklists.has(`affiliate-${affiliateId}`)
+                    const totalChecklists = affiliateData.checklists.length
+                    const totalItems = affiliateData.checklists.reduce((sum, checklist) => 
+                      sum + checklist.groups.reduce((groupSum, group) => groupSum + group.items.length, 0), 0
+                    )
+                    const completedItems = affiliateData.checklists.reduce((sum, checklist) => 
+                      sum + checklist.groups.reduce((groupSum, group) => 
+                        groupSum + group.items.filter(item => 
+                          item.status === 'Completed' || 
+                          item.status === 'Complete' || 
+                          item.status === 'Done' ||
+                          item.status === 'Finished'
+                        ).length, 0
+                      ), 0
+                    )
+                    const progress = totalItems > 0 ? (completedItems / totalItems) * 100 : 0
 
-                              {currentNextEraItems ? (
-                                <div>
-                                  <div className="font-semibold text-white mb-2">
-                                    Current items that will be copied:
-                                  </div>
-                                  {currentNextEraItems.groups.map((group, groupIndex) => (
-                                    <div key={groupIndex} className="mb-3">
-                                      <div className="font-medium text-white/90 mb-1">{group.name}:</div>
-                                      <div className="space-y-1 text-sm ml-4">
-                                        {group.items.map((item, itemIndex) => (
-                                          <div key={itemIndex}>• {item.documentList}</div>
-                                        ))}
-                                      </div>
-                                    </div>
-                                  ))}
-                                </div>
-                              ) : (
-                                <div>
-                                  <div className="font-semibold text-white mb-2">
-                                    No existing checklist found. Standard items will be used:
-                                  </div>
-                                  <div className="space-y-3">
-                                    <div>
-                                      <div className="font-medium text-white/90 mb-1">Aramco Digital Company:</div>
-                                      <div className="space-y-1 text-sm ml-4">
-                                        <div>• Developing Cash Call Package</div>
-                                        <div>• Cash Call Letter from AD CFO</div>
-                                        <div>• Active Bank Certificate</div>
-                                      </div>
-                                    </div>
-                                    <div>
-                                      <div className="font-medium text-white/90 mb-1">
-                                        Business Proponent - T&I Affiliate Affairs:
-                                      </div>
-                                      <div className="space-y-1 text-sm ml-4">
-                                        <div>• Budget Approval and Funding Authority Check</div>
-                                        <div>• Formation Document (CR, Bylaw etc.)</div>
-                                        <div>• Setting up MPS and Obtaining pre-MPS Clearance</div>
-                                        <div>• Creating Cash Call MPS Workflow</div>
-                                        <div>• Notifying SAO Treasury</div>
-                                      </div>
-                                    </div>
-                                    <div>
-                                      <div className="font-medium text-white/90 mb-1">
-                                        2nd Tiered Affiliate:
-                                      </div>
-                                      <div className="space-y-1 text-sm ml-4">
-                                        <div>• Cash Call Letter from CFO/CEO to Capital Owner</div>
-                                        <div>• Approved Business Plan</div>
-                                        <div>• Proof of Budget Approval (e.g. Board Minutes)</div>
-                                        <div>• Active Bank Certificate</div>
-                                        <div>• Shareholders Resolution Signed by SH-Reps</div>
-                                        <div>• Cash Flow Forecast</div>
-                                        <div>• Utilization of Previous Cash Call</div>
-                                        <div>• Utilization of Current Cash Call</div>
-                                        <div>• Additional Documents (Case By Case) Requested By GF&CD</div>
-                                      </div>
-                                    </div>
-                                  </div>
-                                </div>
-                              )}
-                            </div>
-                          </DialogHeader>
-                          <div className="space-y-4">
-                            <div>
-                              <Label className="text-white">Select Affiliate</Label>
-                              <Select value={selectedAffiliateId} onValueChange={setSelectedAffiliateId}>
-                                <SelectTrigger className="enhanced-select">
-                                  <SelectValue placeholder="Choose an affiliate" />
-                                </SelectTrigger>
-                                <SelectContent className="bg-white border-gray-300">
-                                  {availableAffiliates.map((affiliate) => (
-                                    <SelectItem key={affiliate.id} value={affiliate.id}>
-                                      {affiliate.name} ({affiliate.company_code})
-                                    </SelectItem>
-                                  ))}
-                                </SelectContent>
-                              </Select>
-                            </div>
-                            <div className="flex gap-2">
-                              <Button onClick={handleAddAffiliate} className="aramco-button-primary text-white">
-                                <Plus className="h-4 w-4 mr-2" />
-                                Create Checklist
-                              </Button>
+                    return (
+                      <Card key={affiliateId} className="overflow-hidden">
+                        <CardHeader className="pb-3">
+                          <div className="flex items-center justify-between">
+                            <div className="flex items-center gap-4 flex-1">
                               <Button
-                                onClick={() => setIsAddAffiliateOpen(false)}
-                                variant="outline"
-                                className="border-gray-400 text-gray-300 hover:bg-gray-700"
+                                onClick={() => toggleChecklistExpansion(`affiliate-${affiliateId}`)}
+                                variant="ghost"
+                                size="sm"
+                                className="p-1 h-8 w-8 text-[#0033A0] hover:bg-[#0033A0]/10"
                               >
-                                Cancel
+                                {isAffiliateExpanded ? (
+                                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                                  </svg>
+                                ) : (
+                                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                                  </svg>
+                                )}
                               </Button>
+                              <div>
+                                <CardTitle className="text-[#0033A0] text-xl">{affiliateData.affiliate?.name || 'Unknown Affiliate'}</CardTitle>
+                                <div className="flex items-center gap-4 mt-1">
+                                  <Badge variant="outline" className="text-xs">
+                                    {totalChecklists} Checklist{totalChecklists !== 1 ? 's' : ''}
+                                  </Badge>
+                                  <span className="text-sm text-gray-500">
+                                    {totalItems} items
+                                  </span>
+                                </div>
+                              </div>
+                            </div>
+                            <div className="flex items-center gap-3">
+                              <div className="text-right">
+                                <div className="text-sm font-medium text-gray-900">
+                                  {completedItems}/{totalItems} completed
+                                </div>
+                                <div className="text-xs text-gray-500">
+                                  {Math.round(progress)}% complete
+                                </div>
+                              </div>
+                              <div className="w-24 h-3 bg-gray-200 rounded-full overflow-hidden border border-gray-300">
+                                {totalItems > 0 ? (
+                                  <div 
+                                    className="h-full bg-gradient-to-r from-[#00A3E0] to-[#0033A0] transition-all duration-300"
+                                    style={{ width: `${progress}%` }}
+                                  />
+                                ) : (
+                                  <div className="h-full bg-gray-300 flex items-center justify-center">
+                                    <span className="text-xs text-gray-500">No items</span>
+                                  </div>
+                                )}
+                              </div>
                             </div>
                           </div>
-                        </DialogContent>
-                      </Dialog>
-                    </div>
-                  )}
-                </div>
-              </CardHeader>
-              <CardContent>
-                {checklists.length > 0 ? (
-                  <>
-                    {viewMode === 'tabs' ? (
-                      <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full">
-                    <TabsList className="grid w-full grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-2 bg-white/10 h-auto p-2">
-                      {checklists.map((checklist) => {
-                        const stats = getProgressStats(checklist)
-                        const progressPercentage =
-                          stats.totalItems > 0 ? (stats.completedItems / stats.totalItems) * 100 : 0
-
-                        return (
-                          <TabsTrigger
-                            key={checklist.affiliate_id}
-                            value={checklist.affiliate_id}
-                            className="data-[state=active]:bg-[#0033A0] data-[state=active]:text-white text-white p-3 h-auto flex flex-col items-start gap-1"
-                          >
-                            <div className="font-medium text-sm truncate w-full text-left">
-                              {checklist.affiliate_name}
-                            </div>
-                            <div className="text-xs opacity-80">
-                              {stats.completedItems}/{stats.totalItems} ({Math.round(progressPercentage)}%)
-                            </div>
-                          </TabsTrigger>
-                        )
-                      })}
-                    </TabsList>
-
-                    {checklists.map((checklist) => (
-                      <TabsContent key={checklist.affiliate_id} value={checklist.affiliate_id} className="mt-6">
-                        <div className="space-y-8">
-                          {checklist.groups.map((group) => (
-                            <Card
-                              key={group.id}
-                              className="bg-white/95 backdrop-blur-sm border border-gray-200 shadow-lg"
-                            >
-                              <CardHeader>
-                                <div className="flex items-center justify-between">
-                                  {editingGroup?.groupId === group.id ? (
-                                    <div className="flex items-center gap-2 flex-1">
-                                      <Input
-                                        value={editingGroupName}
-                                        onChange={(e) => setEditingGroupName(e.target.value)}
-                                        className="text-lg font-semibold text-[#0033A0] bg-white border-[#0033A0] focus:border-[#00A3E0]"
-                                        onKeyDown={(e) => {
-                                          if (e.key === "Enter") {
-                                            handleSaveGroupEdit()
-                                          } else if (e.key === "Escape") {
-                                            handleCancelGroupEdit()
-                                          }
-                                        }}
-                                        autoFocus
-                                      />
-                                      <div className="flex gap-1">
-                                        <Button
-                                          onClick={handleSaveGroupEdit}
-                                          size="sm"
-                                          className="h-8 px-2 bg-green-600 hover:bg-green-700 text-white"
-                                        >
-                                          <Save className="h-3 w-3" />
-                                        </Button>
-                                        <Button
-                                          onClick={handleCancelGroupEdit}
-                                          size="sm"
-                                          variant="outline"
-                                          className="h-8 px-2 border-gray-400 text-gray-600 bg-transparent"
-                                        >
-                                          <X className="h-3 w-3" />
-                                        </Button>
-                                      </div>
-                                    </div>
-                                  ) : (
-                                    <div className="flex items-center gap-2 flex-1">
-                                      <CardTitle className="text-[#0033A0] text-lg">{group.name}</CardTitle>
-                                      {user.role === "admin" && (
-                                        <Button
-                                          onClick={() => handleStartGroupEdit(checklist.id, group.id, group.name)}
-                                          size="sm"
-                                          variant="ghost"
-                                          className="h-6 w-6 p-0 text-[#00A3E0] hover:bg-[#00A3E0]/10"
-                                        >
-                                          <Edit className="h-3 w-3" />
-                                        </Button>
-                                      )}
-                                    </div>
-                                  )}
-                                  {user.role === "admin" && !editingGroup && (
-                                    <Button
-                                      onClick={() => handleAddItem(checklist.id, group.id)}
-                                      size="sm"
-                                      className="bg-[#00A3E0] hover:bg-[#0033A0] text-white"
-                                    >
-                                      <Plus className="h-3 w-3 mr-1" />
-                                      Add Item
-                                    </Button>
-                                  )}
-                                </div>
-                              </CardHeader>
-                              <CardContent>
-                                <div className="overflow-x-auto">
-                                  {/* Bulk Actions Bar */}
-                                  {user.role === "admin" && selectedItems.size > 0 && (
-                                    <div className="mb-4 p-3 bg-[#0033A0]/10 rounded-lg border border-[#0033A0]/20">
-                                      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                                        <div className="text-sm text-[#0033A0] font-medium">
-                                          {selectedItems.size} item{selectedItems.size !== 1 ? "s" : ""} selected
+                        </CardHeader>
+                        
+                        {isAffiliateExpanded && (
+                          <CardContent className="pt-0">
+                            <div className="space-y-6">
+                              {affiliateData.checklists.map((checklist) => {
+                                const isChecklistExpanded = expandedChecklists.has(`checklist-${checklist.id}`)
+                                
+                                return (
+                                  <Card key={checklist.id} className="border border-gray-100">
+                                    <CardHeader className="pb-3">
+                                      <div className="flex items-center justify-between">
+                                                                                 <div className="flex items-center gap-4 flex-1">
+                                           {bulkMode && userProfile?.role?.toLowerCase() === 'admin' && (
+                                             <Checkbox
+                                               checked={selectedChecklists.has(checklist.id)}
+                                               onCheckedChange={() => toggleChecklistSelection(checklist.id)}
+                                               className="mr-2"
+                                             />
+                                           )}
+                                           <Button
+                                             onClick={() => toggleChecklistExpansion(`checklist-${checklist.id}`)}
+                                             variant="ghost"
+                                             size="sm"
+                                             className="p-1 h-8 w-8 text-gray-600 hover:bg-gray-100"
+                                           >
+                                             {isChecklistExpanded ? (
+                                               <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                                               </svg>
+                                             ) : (
+                                               <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                                               </svg>
+                                             )}
+                                           </Button>
+                                          <div>
+                                            <CardTitle className="text-gray-900 text-base">
+                                              {checklist.affiliate_name}
+                                              {userProfile?.role?.toLowerCase() === "admin" && (
+                                                <Badge variant="outline" className="ml-2 text-xs bg-blue-100 text-blue-800 border-blue-300">
+                                                  Admin Access
+                                                </Badge>
+                                              )}
+                                            </CardTitle>
+                                            <div className="flex items-center gap-4 mt-1">
+                                              <Badge variant="outline" className="text-xs">
+                                                {checklist.template_type}
+                                              </Badge>
+                                              <span className="text-sm text-gray-500">
+                                                {checklist.groups.length} groups • {checklist.groups.reduce((sum, group) => sum + group.items.length, 0)} items
+                                              </span>
+                                            </div>
+                                          </div>
                                         </div>
-                                        <div className="flex items-center gap-2">
-                                          <Select value={bulkUpdateStatus} onValueChange={setBulkUpdateStatus}>
-                                            <SelectTrigger className="w-48 h-8 text-sm">
-                                              <SelectValue placeholder="Select status..." />
-                                            </SelectTrigger>
-                                            <SelectContent>
-                                              {statusOptions.map((option) => (
-                                                <SelectItem key={option.id} value={option.label}>
-                                                  <div className="flex items-center gap-2">
-                                                    <div
-                                                      className={`w-2 h-2 rounded-full ${getStatusBadgeClass(option.color).split(" ")[0]}`}
-                                                    />
-                                                    {option.label}
-                                                  </div>
-                                                </SelectItem>
-                                              ))}
-                                            </SelectContent>
-                                          </Select>
-                                          <Button
-                                            onClick={handleBulkStatusUpdate}
-                                            size="sm"
-                                            className="bg-[#0033A0] hover:bg-[#0033A0]/80 text-white"
-                                            disabled={!bulkUpdateStatus}
-                                          >
-                                            Update Status
-                                          </Button>
-                                          <Button
-                                            onClick={() => setSelectedItems(new Set())}
-                                            size="sm"
-                                            variant="outline"
-                                            className="border-gray-400 text-gray-600"
-                                          >
-                                            Clear Selection
-                                          </Button>
+                                        {/* Debug info - remove this later */}
+                                        <div className="text-xs text-gray-400 mr-2">
+                                          Role: {userProfile?.role} | Affiliate: {checklist.affiliate_id} | User Affiliate: {userProfile?.affiliate_company_id}
                                         </div>
-                                      </div>
-                                    </div>
-                                  )}
-
-                                  <table className="w-full">
-                                    <thead>
-                                      <tr className="border-b border-gray-200">
-                                        {user.role === "admin" && (
-                                          <th className="text-left py-3 px-4 font-semibold text-[#0033A0] w-12">
-                                            <input
-                                              type="checkbox"
-                                              checked={
-                                                selectedItems.size > 0 &&
-                                                selectedItems.size === checklist.groups.flatMap((g) => g.items).length
-                                              }
-                                              onChange={() => handleSelectAllItems(checklist)}
-                                              className="rounded border-[#0033A0] text-[#0033A0] focus:ring-[#0033A0]"
-                                            />
-                                          </th>
-                                        )}
-                                        <th className="text-left py-3 px-4 font-semibold text-[#0033A0] w-20">
-                                          Item No.
-                                        </th>
-                                        <th className="text-left py-3 px-4 font-semibold text-[#0033A0]">
-                                          Document List
-                                        </th>
-                                        <th className="text-left py-3 px-4 font-semibold text-[#0033A0] w-40">
-                                          Status
-                                        </th>
-                                        {user.role === "admin" && (
-                                          <th className="text-left py-3 px-4 font-semibold text-[#0033A0] w-32">
-                                            Actions
-                                          </th>
-                                        )}
-                                      </tr>
-                                    </thead>
-                                    <tbody>
-                                      {group.items.map((item) => (
-                                        <tr
-                                          key={item.id}
-                                          className={`border-b border-gray-100 hover:bg-[#0033A0]/5 transition-colors ${
-                                            selectedItems.has(item.id) ? "bg-[#0033A0]/10" : ""
-                                          }`}
-                                        >
-                                          {user.role === "admin" && (
-                                            <td className="py-3 px-4">
-                                              <input
-                                                type="checkbox"
-                                                checked={selectedItems.has(item.id)}
-                                                onChange={() => handleSelectItem(item.id)}
-                                                className="rounded border-[#0033A0] text-[#0033A0] focus:ring-[#0033A0]"
-                                              />
-                                            </td>
-                                          )}
-                                          <td className="py-3 px-4">
-                                            {editingItem?.itemId === item.id ? (
-                                              <Input
-                                                value={editingValues.itemNo}
-                                                onChange={(e) =>
-                                                  setEditingValues({ ...editingValues, itemNo: e.target.value })
-                                                }
-                                                className="w-16 h-8 text-sm"
-                                              />
-                                            ) : (
-                                              <span className="font-medium text-[#00A3E0]">{item.itemNo}</span>
-                                            )}
-                                          </td>
-                                          <td className="py-3 px-4">
-                                            {editingItem?.itemId === item.id ? (
-                                              <Input
-                                                value={editingValues.documentList}
-                                                onChange={(e) =>
-                                                  setEditingValues({ ...editingValues, documentList: e.target.value })
-                                                }
-                                                className="h-8 text-sm"
-                                              />
-                                            ) : (
-                                              <span className="text-gray-800">{item.documentList}</span>
-                                            )}
-                                          </td>
-                                          <td className="py-3 px-4">
-                                            {editingItem?.itemId === item.id ? (
-                                              <Select
-                                                value={editingValues.status}
-                                                onChange={(value) =>
-                                                  setEditingValues({ ...editingValues, status: value })
-                                                }
-                                              >
-                                                <SelectTrigger className="h-8 text-sm">
-                                                  <SelectValue />
-                                                </SelectTrigger>
-                                                <SelectContent>
-                                                  {statusOptions.map((option) => (
-                                                    <SelectItem key={option.id} value={option.label}>
-                                                      <div className="flex items-center gap-2">
-                                                        <div
-                                                          className={`w-2 h-2 rounded-full ${getStatusBadgeClass(option.color).split(" ")[0]}`}
-                                                        />
-                                                        <div>
-                                                          <div>{option.label}</div>
-                                                          {option.description && (
-                                                            <div className="text-xs text-gray-500">
-                                                              {option.description}
-                                                            </div>
-                                                          )}
-                                                        </div>
-                                                      </div>
-                                                    </SelectItem>
-                                                  ))}
-                                                </SelectContent>
-                                              </Select>
-                                            ) : (
-                                              <Select
-                                                value={item.status}
-                                                onValueChange={(value) =>
-                                                  handleUpdateItemStatus(checklist.id, group.id, item.id, value)
-                                                }
-                                                disabled={user.role !== "admin"}
-                                              >
-                                                <SelectTrigger className="h-8 text-sm border-none bg-transparent p-0 hover:bg-gray-50">
-                                                  <SelectValue asChild>
-                                                    <TooltipProvider>
-                                                      <Tooltip>
-                                                        <TooltipTrigger asChild>
-                                                          <Badge
-                                                            className={`${getStatusBadgeClass(item.status)} flex items-center gap-1 cursor-pointer`}
-                                                          >
-                                                            {getStatusIcon(item.status)}
-                                                            {item.status}
-                                                          </Badge>
-                                                        </TooltipTrigger>
-                                                        <TooltipContent>
-                                                          <div className="max-w-xs">
-                                                            <div className="font-medium">{item.status}</div>
-                                                            {statusOptions.find((opt) => opt.label === item.status)
-                                                              ?.description && (
-                                                              <div className="text-sm text-gray-600 mt-1">
-                                                                {
-                                                                  statusOptions.find((opt) => opt.label === item.status)
-                                                                    ?.description
-                                                                }
-                                                              </div>
-                                                            )}
-                                                            {user.role === "admin" && (
-                                                              <div className="text-xs text-gray-500 mt-1">
-                                                                Click to change status
-                                                              </div>
-                                                            )}
-                                                          </div>
-                                                        </TooltipContent>
-                                                      </Tooltip>
-                                                    </TooltipProvider>
-                                                  </SelectValue>
-                                                </SelectTrigger>
-                                                {user.role === "admin" && (
-                                                  <SelectContent>
-                                                    {statusOptions.map((option) => (
-                                                      <SelectItem key={option.id} value={option.label}>
-                                                        <div className="flex items-center gap-2">
-                                                          <div
-                                                            className={`w-2 h-2 rounded-full ${getStatusBadgeClass(option.color).split(" ")[0]}`}
-                                                          />
-                                                          <div>
-                                                            <div>{option.label}</div>
-                                                            {option.description && (
-                                                              <div className="text-xs text-gray-500">
-                                                                {option.description}
-                                                              </div>
-                                                            )}
-                                                          </div>
-                                                        </div>
-                                                      </SelectItem>
-                                                    ))}
-                                                  </SelectContent>
-                                                )}
-                                              </Select>
-                                            )}
-                                          </td>
-                                          {user.role === "admin" && (
-                                            <td className="py-3 px-4">
-                                              {editingItem?.itemId === item.id ? (
-                                                <div className="flex gap-1">
+                                        {(userProfile?.role?.toLowerCase() === "admin" || (userProfile?.role?.toLowerCase() === "affiliate" && checklist.affiliate_id === userProfile.affiliate_company_id)) && (
+                                          <Tooltip>
+                                            <TooltipTrigger asChild>
+                                              <AlertDialog>
+                                                <AlertDialogTrigger asChild>
                                                   <Button
-                                                    onClick={handleSaveEdit}
-                                                    size="sm"
-                                                    className="h-7 px-2 bg-green-600 hover:bg-green-700 text-white"
-                                                  >
-                                                    <Save className="h-3 w-3" />
-                                                  </Button>
-                                                  <Button
-                                                    onClick={handleCancelEdit}
-                                                    size="sm"
                                                     variant="outline"
-                                                    className="h-7 px-2 border-gray-400 text-gray-600 bg-transparent"
-                                                  >
-                                                    <X className="h-3 w-3" />
-                                                  </Button>
-                                                </div>
-                                              ) : (
-                                                <div className="flex gap-1">
-                                                  <Button
-                                                    onClick={() => handleStartEdit(checklist.id, group.id, item)}
                                                     size="sm"
-                                                    variant="outline"
-                                                    className="h-7 px-2 border-[#00A3E0] text-[#00A3E0] hover:bg-[#00A3E0]/10"
-                                                  >
-                                                    <Edit className="h-3 w-3" />
-                                                  </Button>
-                                                  <Button
-                                                    onClick={() => handleDeleteItem(checklist.id, group.id, item.id)}
-                                                    size="sm"
-                                                    variant="outline"
-                                                    className="h-7 px-2 border-red-400 text-red-400 hover:bg-red-500/10"
+                                                    className="h-8 px-2 border-red-400 text-red-400 hover:bg-red-500/10 hover:border-red-500"
                                                   >
                                                     <Trash2 className="h-3 w-3" />
                                                   </Button>
-                                                </div>
-                                              )}
-                                            </td>
-                                          )}
-                                        </tr>
-                                      ))}
-                                    </tbody>
-                                  </table>
-                                </div>
-                              </CardContent>
-                            </Card>
-                          ))}
-                        </div>
-                      </TabsContent>
-                    ))}
-                  </Tabs>
-                    ) : (
-                      /* Stacked View */
-                      <div className="space-y-6">
-                        {filteredChecklists.length > 0 ? (
-                          filteredChecklists.map((checklist) => {
-                            const stats = getProgressStats(checklist)
-                            const progressPercentage = stats.totalItems > 0 ? (stats.completedItems / stats.totalItems) * 100 : 0
-                            const isExpanded = expandedChecklists.has(checklist.id)
-                            const affiliate = affiliates.find(a => a.id === checklist.affiliate_id)
-                            
-                            return (
-                              <Card key={checklist.id} className="bg-white/95 backdrop-blur-sm border border-gray-200 shadow-lg">
-                                <CardHeader>
-                                  <div className="flex items-center justify-between">
-                                    <div className="flex items-center gap-4 flex-1">
-                                      <Button
-                                        variant="ghost"
-                                        size="sm"
-                                        onClick={() => toggleChecklistExpansion(checklist.id)}
-                                        className="p-0 h-auto text-left"
-                                      >
-                                        <div className="flex items-center gap-3">
-                                          <div className={`w-6 h-6 rounded-full flex items-center justify-center transition-transform ${isExpanded ? 'rotate-90' : ''}`}>
-                                            <div className="w-2 h-2 bg-[#0033A0] rounded-full"></div>
-                                          </div>
-                                          <div>
-                                            <CardTitle className="text-[#0033A0] text-lg">
-                                              {affiliate?.name || checklist.affiliate_id}
-                                            </CardTitle>
-                                            <div className="text-sm text-gray-600 mt-1">
-                                              {stats.completedItems} of {stats.totalItems} items completed
-                                            </div>
-                                          </div>
-                                        </div>
-                                      </Button>
-                                    </div>
-                                    <div className="flex items-center gap-4">
-                                      <div className="flex items-center gap-2">
-                                        <div className="w-32 bg-gray-200 rounded-full h-2">
-                                          <div
-                                            className="bg-[#84BD00] h-2 rounded-full transition-all duration-300"
-                                            style={{ width: `${progressPercentage}%` }}
-                                          />
-                                        </div>
-                                        <span className="text-sm font-medium text-[#0033A0]">
-                                          {Math.round(progressPercentage)}%
-                                        </span>
+                                                </AlertDialogTrigger>
+                                                <AlertDialogContent>
+                                                  <AlertDialogHeader>
+                                                    <AlertDialogTitle>Delete Checklist</AlertDialogTitle>
+                                                    <AlertDialogDescription>
+                                                      Are you sure you want to delete the checklist "{checklist.affiliate_name}"? This action cannot be undone.
+                                                    </AlertDialogDescription>
+                                                  </AlertDialogHeader>
+                                                  <AlertDialogFooter>
+                                                    <AlertDialogCancel>Cancel</AlertDialogCancel>
+                                                    <AlertDialogAction
+                                                      onClick={() => handleDeleteChecklist(checklist.id, checklist.affiliate_name)}
+                                                      className="bg-red-600 hover:bg-red-700"
+                                                    >
+                                                      Delete
+                                                    </AlertDialogAction>
+                                                  </AlertDialogFooter>
+                                                </AlertDialogContent>
+                                              </AlertDialog>
+                                            </TooltipTrigger>
+                                            <TooltipContent>
+                                              <p>Delete this checklist</p>
+                                            </TooltipContent>
+                                          </Tooltip>
+                                        )}
                                       </div>
-                                      {user.role === "admin" && (
-                                        <div className="flex items-center gap-2">
-                                          <Button
-                                            onClick={() => handleStartGroupEdit(checklist.id, "", checklist.affiliate_name || "")}
-                                            size="sm"
-                                            variant="outline"
-                                            className="border-[#00A3E0] text-[#00A3E0] hover:bg-[#00A3E0]/10"
-                                          >
-                                            <Edit className="h-3 w-3" />
-                                          </Button>
-                                          <Button
-                                            onClick={() => handleDeleteAffiliate(checklist.id)}
-                                            size="sm"
-                                            variant="outline"
-                                            className="border-red-400 text-red-400 hover:bg-red-500/10"
-                                          >
-                                            <Trash2 className="h-3 w-3" />
-                                          </Button>
-                                        </div>
-                                      )}
-                                    </div>
-                                  </div>
-                                </CardHeader>
-                                
-                                {isExpanded && (
-                                  <CardContent>
-                                    <div className="space-y-6">
-                                      {checklist.groups.map((group) => (
-                                        <Card key={group.id} className="bg-gray-50/50 border border-gray-200">
-                                          <CardHeader>
-                                            <div className="flex items-center justify-between">
-                                              <CardTitle className="text-[#0033A0] text-base">{group.name}</CardTitle>
-                                              {user.role === "admin" && (
-                                                <Button
-                                                  onClick={() => handleAddItem(checklist.id, group.id)}
-                                                  size="sm"
-                                                  className="bg-[#00A3E0] hover:bg-[#0033A0] text-white"
-                                                >
-                                                  <Plus className="h-3 w-3 mr-1" />
-                                                  Add Item
-                                                </Button>
-                                              )}
-                                            </div>
-                                          </CardHeader>
-                                          <CardContent>
-                                            <div className="overflow-x-auto">
-                                              <table className="w-full">
-                                                <thead>
-                                                  <tr className="border-b border-gray-200">
-                                                    <th className="text-left py-2 px-3 font-semibold text-[#0033A0] w-20">
-                                                      Item No.
-                                                    </th>
-                                                    <th className="text-left py-2 px-3 font-semibold text-[#0033A0]">
-                                                      Document List
-                                                    </th>
-                                                    <th className="text-left py-2 px-3 font-semibold text-[#0033A0] w-40">
-                                                      Status
-                                                    </th>
-                                                    {user.role === "admin" && (
-                                                      <th className="text-left py-2 px-3 font-semibold text-[#0033A0] w-32">
-                                                        Actions
-                                                      </th>
-                                                    )}
-                                                  </tr>
-                                                </thead>
-                                                <tbody>
-                                                  {group.items.map((item) => (
-                                                    <tr key={item.id} className="border-b border-gray-100 hover:bg-[#0033A0]/5">
-                                                      <td className="py-2 px-3">
-                                                        <span className="font-medium text-[#00A3E0]">{item.itemNo}</span>
-                                                      </td>
-                                                      <td className="py-2 px-3">
-                                                        <span className="text-gray-800">{item.documentList}</span>
-                                                      </td>
-                                                      <td className="py-2 px-3">
-                                                        <Select
-                                                          value={item.status}
-                                                          onValueChange={(value) =>
-                                                            handleUpdateItemStatus(checklist.id, group.id, item.id, value)
-                                                          }
-                                                          disabled={user.role !== "admin" && user.role !== "affiliate"}
-                                                        >
-                                                          <SelectTrigger className="h-8 text-sm border-none bg-transparent p-0 hover:bg-gray-50">
-                                                            <SelectValue asChild>
-                                                              <TooltipProvider>
+                                    </CardHeader>
+                                    
+                                    {isChecklistExpanded && (
+                                      <CardContent className="pt-0">
+                                        <div className="space-y-6">
+                                          {checklist.groups.map((group) => (
+                                            <div key={group.id} className="border border-gray-200 rounded-lg p-4">
+                                              <div className="flex items-center justify-between mb-4">
+                                                <h4 className="text-lg font-semibold text-gray-900">{group.name}</h4>
+                                              </div>
+                                              <div className="overflow-x-auto">
+                                                <table className="w-full">
+                                                  <thead>
+                                                    <tr className="border-b border-gray-200">
+                                                      <th className="text-left py-2 px-3 text-sm font-medium text-gray-700">Item No.</th>
+                                                      <th className="text-left py-2 px-3 text-sm font-medium text-gray-700">Document List</th>
+                                                      <th className="text-left py-2 px-3 text-sm font-medium text-gray-700">Status</th>
+                                                    </tr>
+                                                  </thead>
+                                                  <tbody>
+                                                    {group.items.map((item) => (
+                                                      <tr key={item.id} className="border-b border-gray-100 hover:bg-gray-50">
+                                                        <td className="py-3 px-3 text-sm text-gray-900">{item.itemNo}</td>
+                                                        <td className="py-3 px-3 text-sm text-gray-700">{item.documentList}</td>
+                                                        <td className="py-3 px-3">
+                                                          <Select
+                                                            value={item.status}
+                                                            onValueChange={(value) =>
+                                                              handleUpdateItemStatus(checklist.id, group.id, item.id, value)
+                                                            }
+                                                            disabled={userProfile?.role?.toLowerCase() !== "admin" && userProfile?.role?.toLowerCase() !== "affiliate"}
+                                                          >
+                                                            <SelectTrigger className="h-8 text-sm border-none bg-transparent p-0 hover:bg-gray-50">
+                                                              <SelectValue asChild>
                                                                 <Tooltip>
                                                                   <TooltipTrigger asChild>
                                                                     <Badge
@@ -1744,103 +1110,157 @@ export default function ChecklistPage() {
                                                                     </div>
                                                                   </TooltipContent>
                                                                 </Tooltip>
-                                                              </TooltipProvider>
-                                                            </SelectValue>
-                                                          </SelectTrigger>
-                                                          {(user.role === "admin" || user.role === "affiliate") && (
-                                                            <SelectContent>
-                                                              {statusOptions.map((option) => (
-                                                                <SelectItem key={option.id} value={option.label}>
-                                                                  <div className="flex items-center gap-2">
-                                                                    <div className={`w-2 h-2 rounded-full ${getStatusBadgeClass(option.color).split(" ")[0]}`} />
-                                                                    {option.label}
-                                                                  </div>
-                                                                </SelectItem>
-                                                              ))}
-                                                            </SelectContent>
-                                                          )}
-                                                        </Select>
-                                                      </td>
-                                                      {user.role === "admin" && (
-                                                        <td className="py-2 px-3">
-                                                          <div className="flex gap-1">
-                                                            <Button
-                                                              onClick={() => handleStartEdit(checklist.id, group.id, item)}
-                                                              size="sm"
-                                                              variant="outline"
-                                                              className="h-7 px-2 border-[#00A3E0] text-[#00A3E0] hover:bg-[#00A3E0]/10"
-                                                            >
-                                                              <Edit className="h-3 w-3" />
-                                                            </Button>
-                                                            <Button
-                                                              onClick={() => handleDeleteItem(checklist.id, group.id, item.id)}
-                                                              size="sm"
-                                                              variant="outline"
-                                                              className="h-7 px-2 border-red-400 text-red-400 hover:bg-red-500/10"
-                                                            >
-                                                              <Trash2 className="h-3 w-3" />
-                                                            </Button>
-                                                          </div>
+                                                              </SelectValue>
+                                                            </SelectTrigger>
+                                                            {(userProfile?.role?.toLowerCase() === "admin" || userProfile?.role?.toLowerCase() === "affiliate") && (
+                                                              <SelectContent>
+                                                                {statusOptions.map((option) => (
+                                                                  <SelectItem key={option.id} value={option.label}>
+                                                                    <div className="flex items-center gap-2">
+                                                                      <div className={`w-2 h-2 rounded-full ${getStatusBadgeClass(option.color).split(" ")[0]}`} />
+                                                                      {option.label}
+                                                                    </div>
+                                                                  </SelectItem>
+                                                                ))}
+                                                              </SelectContent>
+                                                            )}
+                                                          </Select>
                                                         </td>
-                                                      )}
-                                                    </tr>
-                                                  ))}
-                                                </tbody>
-                                              </table>
+                                                      </tr>
+                                                    ))}
+                                                  </tbody>
+                                                </table>
+                                              </div>
                                             </div>
-                                          </CardContent>
-                                        </Card>
-                                      ))}
-                                    </div>
-                                  </CardContent>
-                                )}
-                              </Card>
-                            )
-                          })
-                        ) : (
-                          <div className="text-center py-12">
-                            <CheckSquare className="h-16 w-16 text-gray-400 mx-auto mb-4" />
-                            <h3 className="text-xl font-semibold text-gray-700 mb-2">No Checklists Found</h3>
-                            <p className="text-gray-600 mb-6">
-                              Try adjusting your search or filter criteria.
-                            </p>
-                            <Button
-                              onClick={clearFilters}
-                              variant="outline"
-                              className="border-[#0033A0] text-[#0033A0] hover:bg-[#0033A0]/10"
-                            >
-                              Clear Filters
-                            </Button>
-                          </div>
+                                          ))}
+                                        </div>
+                                      </CardContent>
+                                    )}
+                                  </Card>
+                                )
+                              })}
+                            </div>
+                          </CardContent>
                         )}
-                      </div>
-                    )}
-                  </>
-                ) : (
-                  <div className="text-center py-12">
-                    <CheckSquare className="h-16 w-16 text-gray-400 mx-auto mb-4" />
-                    <h3 className="text-xl font-semibold text-gray-700 mb-2">No Checklists Yet</h3>
-                    <p className="text-gray-600 mb-6">
-                      {availableAffiliates.length > 0
-                        ? "Create your first affiliate checklist to get started with standardized items."
-                        : "No affiliates available. Please add affiliates first in the Admin Settings."}
-                    </p>
-                    {user.role === "admin" && availableAffiliates.length > 0 && (
-                      <Button
-                        onClick={() => setIsAddAffiliateOpen(true)}
-                        className="aramco-button-primary text-white enhanced-button"
-                      >
-                        <Plus className="h-4 w-4 mr-2" />
-                        Create First Checklist
-                      </Button>
-                    )}
-                  </div>
-                )}
-              </CardContent>
-            </Card>
-          </div>
+                      </Card>
+                    )
+                  })}
+                </div>
+
+            </>
+          )}
         </div>
+
+        {/* Create Checklist Dialog */}
+        <Dialog open={isCreateChecklistOpen} onOpenChange={setIsCreateChecklistOpen}>
+          <DialogContent className="max-w-md">
+            <DialogHeader>
+              <DialogTitle>Create New Checklist</DialogTitle>
+              <DialogDescription>
+                Create a new checklist for an affiliate and link it to a specific cash call.
+              </DialogDescription>
+            </DialogHeader>
+            <div className="space-y-4">
+              <div>
+                <Label htmlFor="affiliate-select">Affiliate</Label>
+                <Select
+                  value={selectedAffiliateForChecklist?.id || ""}
+                  onValueChange={(value) => {
+                    const affiliate = affiliates.find(a => a.id === value)
+                    setSelectedAffiliateForChecklist(affiliate || null)
+                    setSelectedCashCallForChecklist(null) // Reset cash call selection when affiliate changes
+                  }}
+                >
+                  <SelectTrigger>
+                    <SelectValue placeholder="Select an affiliate" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {affiliates
+                      .filter(affiliate => 
+                        userProfile?.role?.toLowerCase() !== 'affiliate' || 
+                        affiliate.id === userProfile?.affiliate_company_id
+                      )
+                      .map((affiliate) => (
+                        <SelectItem key={affiliate.id} value={affiliate.id}>
+                          {affiliate.name}
+                        </SelectItem>
+                      ))}
+                  </SelectContent>
+                </Select>
+              </div>
+              {selectedAffiliateForChecklist && (
+                <div>
+                  <Label htmlFor="cash-call-select">Cash Call</Label>
+                  <Select
+                    value={selectedCashCallForChecklist?.id || ""}
+                    onValueChange={(value) => {
+                      const cashCall = getAvailableCashCallsForAffiliate(selectedAffiliateForChecklist.id).find(c => c.id === value)
+                      setSelectedCashCallForChecklist(cashCall || null)
+                    }}
+                  >
+                    <SelectTrigger>
+                      <SelectValue placeholder="Select a cash call" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {getAvailableCashCallsForAffiliate(selectedAffiliateForChecklist.id).map((cashCall) => (
+                        <SelectItem key={cashCall.id} value={cashCall.id}>
+                          <div className="flex flex-col">
+                            <span className="font-medium">{cashCall.call_number}</span>
+                            <span className="text-xs text-gray-500">
+                              ${cashCall.amount_requested?.toLocaleString() || '0'} • {cashCall.status}
+                            </span>
+                          </div>
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  {getAvailableCashCallsForAffiliate(selectedAffiliateForChecklist.id).length === 0 && (
+                    <div className="text-sm text-red-500 mt-1">
+                      <p>No available cash calls for this affiliate. All cash calls already have checklists.</p>
+                    </div>
+                  )}
+                </div>
+              )}
+              <div>
+                <Label htmlFor="template-type">Template Type</Label>
+                <Select
+                  value={checklistTemplateType}
+                  onValueChange={(value: 'CAPEX' | 'OPEX') => setChecklistTemplateType(value)}
+                >
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="CAPEX">CAPEX</SelectItem>
+                    <SelectItem value="OPEX">OPEX</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+            </div>
+            <div className="flex justify-end gap-2 mt-6">
+              <Button
+                variant="outline"
+                onClick={() => {
+                  setIsCreateChecklistOpen(false)
+                  setSelectedAffiliateForChecklist(null)
+                  setSelectedCashCallForChecklist(null)
+                  setChecklistTemplateType('CAPEX')
+                }}
+              >
+                Cancel
+              </Button>
+              <Button 
+                onClick={handleCreateChecklist} 
+                className="aramco-button-primary"
+                disabled={!selectedAffiliateForChecklist || !selectedCashCallForChecklist}
+              >
+                Create Checklist
+              </Button>
+            </div>
+          </DialogContent>
+        </Dialog>
+      </div>
       </TooltipProvider>
-    </ErrorBoundary>
+    </>
   )
 }

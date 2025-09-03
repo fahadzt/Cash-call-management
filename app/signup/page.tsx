@@ -53,7 +53,7 @@ export default function SignUpPage() {
     password: "",
     confirmPassword: "",
     fullName: "",
-    role: "viewer" as "viewer" | "affiliate" | "approver" | "admin",
+    role: "admin" as "finance" | "affiliate" | "cfo" | "admin",
     affiliateCompanyId: "",
     position: "",
     phone: ""
@@ -125,7 +125,7 @@ export default function SignUpPage() {
     }
   }
 
-  const handleRoleChange = (role: "viewer" | "affiliate" | "approver" | "admin") => {
+  const handleRoleChange = (role: "finance" | "affiliate" | "cfo" | "admin") => {
     setFormData({ ...formData, role })
     // Reset affiliate company if role is not affiliate
     if (role !== "affiliate") {
@@ -219,10 +219,10 @@ export default function SignUpPage() {
                     <SelectValue placeholder="Select your account type" />
                   </SelectTrigger>
                   <SelectContent className="bg-white border-gray-300">
-                    <SelectItem value="viewer" className="text-gray-700 hover:bg-[#0033A0]/10">
+                    <SelectItem value="finance" className="text-gray-700 hover:bg-[#0033A0]/10">
                       <div className="flex items-center gap-2">
                         <Users className="h-4 w-4" />
-                        Viewer (Read-only access)
+                        Finance User (Review & Assignment)
                       </div>
                     </SelectItem>
                     <SelectItem value="affiliate" className="text-gray-700 hover:bg-[#0033A0]/10">
@@ -231,16 +231,16 @@ export default function SignUpPage() {
                         Affiliate Company User
                       </div>
                     </SelectItem>
-                    <SelectItem value="approver" className="text-gray-700 hover:bg-[#0033A0]/10">
+                    <SelectItem value="cfo" className="text-gray-700 hover:bg-[#0033A0]/10">
                       <div className="flex items-center gap-2">
                         <Users className="h-4 w-4" />
-                        Approver (Internal)
+                        CFO (Approval Authority)
                       </div>
                     </SelectItem>
                     <SelectItem value="admin" className="text-gray-700 hover:bg-[#0033A0]/10">
                       <div className="flex items-center gap-2">
                         <Users className="h-4 w-4" />
-                        Administrator (Internal)
+                        Administrator (Full Access)
                       </div>
                     </SelectItem>
                   </SelectContent>

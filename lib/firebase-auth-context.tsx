@@ -55,36 +55,7 @@ export function AuthProvider({ children }: AuthProviderProps) {
           return
         }
 
-        // Test Firebase connectivity
-        try {
-          // Simple connectivity test
-          await new Promise((resolve, reject) => {
-            const timeout = setTimeout(() => reject(new Error('Connection timeout')), 5000)
-            
-            // Test if Firebase auth is accessible
-            const testAuth = () => {
-              try {
-                unsubscribe = onAuthStateChanged(auth, (firebaseUser) => {
-                  clearTimeout(timeout)
-                  resolve(firebaseUser)
-                }, (error) => {
-                  clearTimeout(timeout)
-                  reject(error)
-                })
-              } catch (err) {
-                clearTimeout(timeout)
-                reject(err)
-              }
-            }
-            
-            testAuth()
-          })
-        } catch (connectError) {
-          console.error('Firebase connection test failed:', connectError)
-          setError('Unable to connect to Firebase services. Please check your internet connection and try again.')
-          setLoading(false)
-          return
-        }
+        // Skip connection test for now - go directly to auth setup
 
         // If we get here, Firebase is accessible
         unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {

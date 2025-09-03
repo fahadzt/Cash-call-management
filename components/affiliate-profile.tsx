@@ -53,17 +53,21 @@ export function AffiliateProfile({ affiliateId, onBack }: AffiliateProfileProps)
   const getStatusBadgeClass = (status: string) => {
     switch (status) {
       case "draft":
-        return "status-draft enhanced-badge"
+        return "bg-gray-500 text-white"
       case "under_review":
-        return "status-review enhanced-badge"
+        return "bg-yellow-500 text-white"
+      case "finance_review":
+        return "bg-yellow-500 text-white"
+      case "ready_for_cfo":
+        return "bg-orange-500 text-white"
       case "approved":
-        return "status-approved enhanced-badge"
+        return "bg-green-500 text-white"
       case "paid":
-        return "status-paid enhanced-badge"
+        return "bg-blue-500 text-white"
       case "rejected":
-        return "status-rejected enhanced-badge"
+        return "bg-red-500 text-white"
       default:
-        return "status-draft enhanced-badge"
+        return "bg-gray-500 text-white"
     }
   }
 
@@ -73,6 +77,10 @@ export function AffiliateProfile({ affiliateId, onBack }: AffiliateProfileProps)
         return "Draft"
       case "under_review":
         return "Under Review"
+      case "finance_review":
+        return "Finance Review"
+      case "ready_for_cfo":
+        return "Ready for CFO"
       case "approved":
         return "Approved"
       case "paid":

@@ -1,0 +1,27 @@
+{
+  "name": "dashboard-service",
+  "version": "1.0.0",
+  "description": "Dashboard and Analytics Microservice",
+  "main": "index.js",
+  "scripts": {
+    "dev": "next dev -p 3003",
+    "build": "next build",
+    "start": "next start -p 3003",
+    "lint": "next lint"
+  },
+  "dependencies": {
+    "next": "^15.2.4",
+    "react": "^19.1.1",
+    "react-dom": "^19.1.1",
+    "typescript": "^5.0.0",
+    "@types/node": "^20.0.0",
+    "@types/react": "^18.0.0",
+    "@types/react-dom": "^18.0.0",
+    "firebase": "^10.0.0",
+    "lucide-react": "^0.263.1"
+  },
+  "devDependencies": {
+    "eslint": "^8.0.0",
+    "eslint-config-next": "^15.2.4"
+  }
+}

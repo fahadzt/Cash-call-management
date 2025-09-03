@@ -36,6 +36,7 @@ import {
 import {
   ref,
   uploadBytes,
+  uploadBytesResumable,
   getDownloadURL,
   deleteObject,
   listAll,
@@ -61,8 +62,9 @@ export interface User {
   id: string
   email: string
   full_name: string
-  role: 'admin' | 'approver' | 'affiliate' | 'viewer'
-  affiliate_company_id?: string // Link to affiliate company for affiliate users
+  role: 'admin' | 'approver' | 'affiliate' | 'viewer' | 'finance' | 'cfo'
+  companyId: string // For tenant isolation - AFFILIATE users have their company ID, internal users have parent company ID
+  affiliate_company_id?: string // Link to affiliate company for affiliate users (legacy field)
   department?: string
   position?: string
   phone?: string
@@ -109,8 +111,9 @@ export interface CashCall {
   call_number: string
   title?: string
   affiliate_id: string
+  affiliateCompanyId: string // For tenant isolation - matches affiliate_id but more explicit
   amount_requested: number
-  status: 'draft' | 'under_review' | 'approved' | 'paid' | 'rejected'
+  status: 'draft' | 'under_review' | 'submitted' | 'finance_review' | 'ready_for_cfo' | 'approved' | 'paid' | 'rejected'
   priority: 'low' | 'medium' | 'high' | 'urgent'
   category?: string
   subcategory?: string
@@ -130,6 +133,8 @@ export interface CashCall {
   risk_assessment?: string
   compliance_status: 'pending' | 'approved' | 'rejected' | 'under_review'
   created_by: string
+  createdByUserId: string // For consistency with new naming
+  assigneeUserId?: string // For assignment system - nullable
   created_at: Date
   updated_at: Date
   due_date?: Date
@@ -193,6 +198,23 @@ export interface ChecklistTemplate {
   created_at: Date
   updated_at: Date
   version?: number
+}
+
+export interface DocumentRequirement {
+  id: string
+  affiliate_id?: string // Optional - if null, applies to all affiliates
+  document_type: string
+  title: string
+  description?: string
+  is_required: boolean
+  file_types: string[]
+  max_file_size?: number // in MB
+  order_index: number
+  created_by: string
+  created_at: Date
+  updated_at: Date
+  is_global?: boolean // Flag to indicate if this applies to all affiliates
+  applies_to: 'opex' | 'capex' | 'both' // Which type of cash call this applies to
 }
 
 export interface ChecklistItem {
@@ -297,6 +319,7 @@ export async function signUp(email: string, password: string, userData: Partial<
       email: email,
       full_name: userData.full_name || '',
       role: userData.role || 'viewer',
+      companyId: 'parent-company', // Default company ID for internal users
       affiliate_company_id: userData.affiliate_company_id || null,
       position: userData.position || null,
       phone: userData.phone || null,
@@ -407,6 +430,50 @@ export async function getUserProfile(userId: string): Promise<User | null> {
   }
 }
 
+export async function getUser(userId: string): Promise<User> {
+  try {
+    console.log('getUser called with userId:', userId)
+    
+    if (!userId) {
+      throw new Error('User ID is required')
+    }
+    
+    const userDoc = await getDoc(doc(db, 'users', userId))
+    
+    if (!userDoc.exists()) {
+      throw new Error('User not found')
+    }
+
+    const data = userDoc.data()
+    console.log('User document data:', data)
+
+    // Ensure all required fields have fallback values
+    const user: User = {
+      id: userDoc.id,
+      email: data.email || '',
+      full_name: data.full_name || '',
+      role: data.role || 'viewer',
+      companyId: data.companyId || data.affiliate_company_id || 'parent-company',
+      affiliate_company_id: data.affiliate_company_id || null,
+      department: data.department || null,
+      position: data.position || null,
+      phone: data.phone || null,
+      is_active: data.is_active !== false, // Default to true if not set
+      last_login: data.last_login?.toDate() || null,
+      created_at: data.created_at?.toDate() || new Date(),
+      updated_at: data.updated_at?.toDate() || new Date(),
+      avatar_url: data.avatar_url || null,
+      preferences: data.preferences || {}
+    }
+    
+    console.log('Processed user object:', user)
+    return user
+  } catch (error) {
+    console.error('Error fetching user:', error)
+    throw error
+  }
+}
+
 export async function updateUserProfile(userId: string, updates: Partial<User>): Promise<void> {
   try {
     const userRef = doc(db, 'users', userId)
@@ -429,6 +496,96 @@ export async function updateUserRole(userId: string, role: User['role']): Promis
     })
   } catch (error) {
     console.error('Error updating user role:', error)
+    throw error
+  }
+}
+
+
+
+// Function to send in-app notifications
+export async function sendInAppNotification(
+  userId: string, 
+  notification: {
+    type: string
+    title: string
+    message: string
+    cashCallId?: string
+    assignedBy?: string
+    timestamp: Date
+  }
+): Promise<void> {
+  try {
+    const notificationRef = collection(db, 'notifications')
+    await addDoc(notificationRef, {
+      user_id: userId,
+      type: notification.type,
+      title: notification.title,
+      message: notification.message,
+      cash_call_id: notification.cashCallId || null,
+      assigned_by: notification.assignedBy || null,
+      read: false,
+      created_at: serverTimestamp(),
+      timestamp: notification.timestamp
+    })
+    console.log('Notification sent to user:', userId)
+  } catch (error) {
+    console.error('Error sending notification:', error)
+    // Don't throw error to avoid breaking the assignment process
+  }
+}
+
+// Function to get notifications for a user
+export async function getUserNotifications(userId: string): Promise<any[]> {
+  try {
+    // Simplified query without ordering to avoid index requirement
+    const q = query(
+      collection(db, 'notifications'),
+      where('user_id', '==', userId),
+      limit(50)
+    )
+    
+    const querySnapshot = await getDocs(q)
+    const notifications = querySnapshot.docs.map(doc => ({
+      id: doc.id,
+      ...doc.data(),
+      created_at: doc.data().created_at?.toDate(),
+      timestamp: doc.data().timestamp?.toDate()
+    }))
+    
+    // Sort in memory instead of in the query
+    notifications.sort((a, b) => {
+      const dateA = a.created_at || a.timestamp || new Date(0)
+      const dateB = b.created_at || b.timestamp || new Date(0)
+      return dateB.getTime() - dateA.getTime()
+    })
+    
+    return notifications
+  } catch (error) {
+    console.error('Error fetching notifications:', error)
+    return []
+  }
+}
+
+// Function to mark notification as read
+export async function markNotificationAsRead(notificationId: string): Promise<void> {
+  try {
+    const notificationRef = doc(db, 'notifications', notificationId)
+    await updateDoc(notificationRef, {
+      read: true,
+      updated_at: serverTimestamp()
+    })
+  } catch (error) {
+    console.error('Error marking notification as read:', error)
+  }
+}
+
+// Function to delete notification
+export async function deleteNotification(notificationId: string): Promise<void> {
+  try {
+    const notificationRef = doc(db, 'notifications', notificationId)
+    await deleteDoc(notificationRef)
+  } catch (error) {
+    console.error('Error deleting notification:', error)
     throw error
   }
 }
@@ -668,21 +825,65 @@ export async function getCashCalls(filters?: {
 
 export async function getCashCall(id: string): Promise<CashCall | null> {
   try {
+    console.log('getCashCall called with id:', id)
+    
+    if (!id) {
+      throw new Error('Cash call ID is required')
+    }
+    
     const cashCallDoc = await getDoc(doc(db, 'cash_calls', id))
     
     if (!cashCallDoc.exists()) {
+      console.log('Cash call not found:', id)
       return null
     }
 
-    return {
+    const data = cashCallDoc.data()
+    console.log('Cash call document data:', data)
+
+    // Ensure all required fields have fallback values
+    const cashCall: CashCall = {
       id: cashCallDoc.id,
-      ...cashCallDoc.data(),
-      created_at: cashCallDoc.data().created_at?.toDate(),
-      updated_at: cashCallDoc.data().updated_at?.toDate(),
-      due_date: cashCallDoc.data().due_date?.toDate(),
-      approved_at: cashCallDoc.data().approved_at?.toDate(),
-      paid_at: cashCallDoc.data().paid_at?.toDate()
-    } as CashCall
+      call_number: data.call_number || '',
+      title: data.title || '',
+      affiliate_id: data.affiliate_id || '',
+      affiliateCompanyId: data.affiliateCompanyId || data.affiliate_id || '',
+      amount_requested: data.amount_requested || 0,
+      status: data.status || 'draft',
+      priority: data.priority || 'medium',
+      category: data.category || '',
+      subcategory: data.subcategory || '',
+      description: data.description || '',
+      currency: data.currency || 'USD',
+      exchange_rate: data.exchange_rate || 1.0,
+      amount_in_original_currency: data.amount_in_original_currency || null,
+      original_currency: data.original_currency || null,
+      payment_terms: data.payment_terms || '',
+      payment_method: data.payment_method || '',
+      bank_account_info: data.bank_account_info || null,
+      supporting_documents: data.supporting_documents || [],
+      rejection_reason: data.rejection_reason || '',
+      internal_notes: data.internal_notes || '',
+      external_notes: data.external_notes || '',
+      tags: data.tags || [],
+      risk_assessment: data.risk_assessment || '',
+      compliance_status: data.compliance_status || 'pending',
+      created_by: data.created_by || '',
+      createdByUserId: data.createdByUserId || data.created_by || '',
+      assigneeUserId: data.assigneeUserId || null,
+      created_at: data.created_at?.toDate() || new Date(),
+      updated_at: data.updated_at?.toDate() || new Date(),
+      due_date: data.due_date?.toDate() || null,
+      approved_at: data.approved_at?.toDate() || null,
+      approved_by: data.approved_by || null,
+      paid_at: data.paid_at?.toDate() || null,
+      workflow_step: data.workflow_step || 1,
+      total_approved_amount: data.total_approved_amount || 0,
+      remaining_amount: data.remaining_amount || 0
+    }
+    
+    console.log('Processed cash call object:', cashCall)
+    return cashCall
   } catch (error) {
     console.error('Error fetching cash call:', error)
     throw error
@@ -711,14 +912,20 @@ export async function createCashCall(cashCallData: Omit<CashCall, 'id' | 'create
     
     console.log('Debug - Cash call created successfully with ID:', docRef.id)
     
-    // Log activity
-    await logActivity({
-      user_id: cashCallData.created_by,
-      action: 'cash_call_created',
-      entity_type: 'cash_call',
-      entity_id: docRef.id,
-      new_values: cashCallData
-    })
+    // Log activity (but don't fail if activity_logs collection doesn't exist)
+    try {
+      await logActivity({
+        user_id: cashCallData.created_by,
+        action: 'cash_call_created',
+        entity_type: 'cash_call',
+        entity_id: docRef.id,
+        new_values: cashCallData
+      })
+      console.log('Debug - Activity logged successfully')
+    } catch (activityError) {
+      console.warn('Activity logging failed (collection may not exist):', activityError)
+      // Don't throw - this is not critical for cash call creation
+    }
 
     return docRef.id
   } catch (error) {
@@ -740,15 +947,20 @@ export async function updateCashCall(id: string, updates: Partial<CashCall>, use
       updated_at: serverTimestamp()
     })
 
-    // Log activity
-    await logActivity({
-      user_id: userId,
-      action: 'cash_call_updated',
-      entity_type: 'cash_call',
-      entity_id: id,
-      old_values: oldValues,
-      new_values: { ...oldValues, ...updates }
-    })
+    // Log activity (but don't fail if activity_logs collection doesn't exist)
+    try {
+      await logActivity({
+        user_id: userId,
+        action: 'cash_call_updated',
+        entity_type: 'cash_call',
+        entity_id: id,
+        old_values: oldValues,
+        new_values: { ...oldValues, ...updates }
+      })
+    } catch (activityError) {
+      console.warn('Activity logging failed (collection may not exist):', activityError)
+      // Don't throw - this is not critical for cash call updates
+    }
   } catch (error) {
     console.error('Error updating cash call:', error)
     throw error
@@ -765,14 +977,19 @@ export async function deleteCashCall(id: string, userId: string): Promise<void> 
     
     await deleteDoc(cashCallRef)
 
-    // Log activity
-    await logActivity({
-      user_id: userId,
-      action: 'cash_call_deleted',
-      entity_type: 'cash_call',
-      entity_id: id,
-      old_values: oldValues
-    })
+    // Log activity (but don't fail if activity_logs collection doesn't exist)
+    try {
+      await logActivity({
+        user_id: userId,
+        action: 'cash_call_deleted',
+        entity_type: 'cash_call',
+        entity_id: id,
+        old_values: oldValues
+      })
+    } catch (activityError) {
+      console.warn('Activity logging failed (collection may not exist):', activityError)
+      // Don't throw - this is not critical for cash call deletion
+    }
   } catch (error) {
     console.error('Error deleting cash call:', error)
     throw error
@@ -977,15 +1194,7 @@ export async function uploadAvatar(userId: string, file: File): Promise<string> 
   }
 }
 
-export async function uploadDocument(cashCallId: string, file: File): Promise<string> {
-  try {
-    const path = `documents/cash_calls/${cashCallId}/${Date.now()}_${file.name}`
-    return await uploadFile(file, path)
-  } catch (error) {
-    console.error('Error uploading document:', error)
-    throw error
-  }
-}
+
 
 // =====================================================
 // REAL-TIME LISTENERS
@@ -1355,8 +1564,8 @@ export async function validateUserPermissions(userId: string, resource: string, 
     // Admin can do everything
     if (user.role === 'admin') return true
 
-    // Approver can approve/reject cash calls
-    if (user.role === 'approver' && resource === 'cash_calls' && ['approve', 'reject'].includes(action)) {
+    // CFO can approve/reject cash calls
+    if (user.role === 'CFO' && resource === 'cash_calls' && ['approve', 'reject'].includes(action)) {
       return true
     }
 
@@ -1391,18 +1600,7 @@ export async function sendNotification(notification: Omit<Notification, 'id' | '
   }
 }
 
-export async function markNotificationAsRead(notificationId: string): Promise<void> {
-  try {
-    const notificationRef = doc(db, 'notifications', notificationId)
-    await updateDoc(notificationRef, {
-      is_read: true,
-      read_at: serverTimestamp()
-    })
-  } catch (error) {
-    console.error('Error marking notification as read:', error)
-    throw error
-  }
-} 
+ 
 
 // =====================================================
 // CHECKLIST OPERATIONS
@@ -1780,11 +1978,11 @@ export async function createAffiliateChecklist(
     const newChecklist: Omit<AffiliateChecklist, 'id'> = {
       affiliate_id: affiliateId,
       affiliate_name: affiliateName,
-      cash_call_id: cashCallId, // Link to cash call if provided
       template_type: templateType,
       groups: groupsToCreate,
       created_at: timestamp,
       updated_at: timestamp,
+      ...(cashCallId && { cash_call_id: cashCallId }), // Only include if cashCallId is provided
     }
 
     const docRef = await addDoc(collection(db, 'affiliate_checklists'), newChecklist)
@@ -2160,12 +2358,15 @@ export async function getCashCallsForUser(userId: string, userRole: string, affi
       affiliateCompanyId
     })
 
-    if (userRole === 'admin' || userRole === 'approver') {
+    // Normalize role to lowercase for comparison
+    const normalizedRole = userRole.toLowerCase()
+    
+    if (normalizedRole === 'admin' || normalizedRole === 'approver') {
       // Admins and approvers can see all cash calls
       const allCashCalls = await getCashCalls()
       console.log('Debug - Admin/Approver: returning all cash calls:', allCashCalls.length)
       return allCashCalls
-    } else if (userRole === 'affiliate') {
+    } else if (normalizedRole === 'affiliate') {
       // Affiliate users can only see their company's cash calls
       if (!affiliateCompanyId) {
         console.warn('Affiliate user has no affiliate_company_id assigned')
@@ -2216,11 +2417,14 @@ export async function getCashCallsForUser(userId: string, userRole: string, affi
 
 export async function canUserAccessCashCall(userId: string, userRole: string, affiliateCompanyId: string | undefined, cashCallId: string) {
   try {
-    if (userRole === 'admin' || userRole === 'approver') {
+    // Normalize role to lowercase for comparison
+    const normalizedRole = userRole.toLowerCase()
+    
+    if (normalizedRole === 'admin' || normalizedRole === 'approver') {
       return true // Admins and approvers can access all cash calls
     }
 
-    if (userRole === 'affiliate' && affiliateCompanyId) {
+    if (normalizedRole === 'affiliate' && affiliateCompanyId) {
       // Get the cash call to check if it belongs to the user's affiliate company
       const cashCalls = await getCashCalls()
       const cashCall = cashCalls.find(cc => cc.id === cashCallId)
@@ -2236,11 +2440,14 @@ export async function canUserAccessCashCall(userId: string, userRole: string, af
 
 export async function canUserModifyCashCall(userId: string, userRole: string, affiliateCompanyId: string | undefined, cashCallId: string) {
   try {
-    if (userRole === 'admin' || userRole === 'approver') {
+    // Normalize role to lowercase for comparison
+    const normalizedRole = userRole.toLowerCase()
+    
+    if (normalizedRole === 'admin' || normalizedRole === 'approver') {
       return true // Admins and approvers can modify all cash calls
     }
 
-    if (userRole === 'affiliate' && affiliateCompanyId) {
+    if (normalizedRole === 'affiliate' && affiliateCompanyId) {
       // Affiliate users can only modify their own company's cash calls
       const cashCalls = await getCashCalls()
       const cashCall = cashCalls.find(cc => cc.id === cashCallId)
@@ -2256,13 +2463,28 @@ export async function canUserModifyCashCall(userId: string, userRole: string, af
 
 export async function getChecklistsForUser(userId: string, userRole: string, affiliateCompanyId?: string) {
   try {
-    if (userRole === 'admin' || userRole === 'approver') {
+    // Normalize role to lowercase for comparison
+    const normalizedRole = userRole.toLowerCase()
+    
+    if (normalizedRole === 'admin' || normalizedRole === 'approver') {
       // Admins and approvers can see all checklists
       return await getAllChecklists()
-    } else if (userRole === 'affiliate' && affiliateCompanyId) {
+    } else if (normalizedRole === 'affiliate' && affiliateCompanyId) {
       // Affiliate users can only see their company's checklists
       const checklists = await getAllChecklists()
       return checklists.filter(checklist => checklist.affiliate_id === affiliateCompanyId)
+    } else if (normalizedRole === 'finance') {
+      // Finance users can only see checklists for cash calls assigned to them
+      const checklists = await getAllChecklists()
+      const assignedCashCalls = await getCashCallsByAccess(userId)
+      const assignedCashCallIds = assignedCashCalls.map(cc => cc.id)
+      return checklists.filter(checklist => assignedCashCallIds.includes(checklist.cash_call_id))
+    } else if (normalizedRole === 'cfo') {
+      // CFO users can only see checklists for cash calls ready for their review
+      const checklists = await getAllChecklists()
+      const cfoCashCalls = await getCashCallsByAccess(userId)
+      const cfoCashCallIds = cfoCashCalls.map(cc => cc.id)
+      return checklists.filter(checklist => cfoCashCallIds.includes(checklist.cash_call_id))
     } else {
       // Viewers can see all checklists (read-only)
       return await getAllChecklists()
@@ -2275,15 +2497,40 @@ export async function getChecklistsForUser(userId: string, userRole: string, aff
 
 export async function canUserAccessChecklist(userId: string, userRole: string, affiliateCompanyId: string | undefined, checklistId: string) {
   try {
-    if (userRole === 'admin' || userRole === 'approver') {
+    // Normalize role to lowercase for comparison
+    const normalizedRole = userRole.toLowerCase()
+    
+    if (normalizedRole === 'admin' || normalizedRole === 'approver') {
       return true // Admins and approvers can access all checklists
     }
 
-    if (userRole === 'affiliate' && affiliateCompanyId) {
+    if (normalizedRole === 'affiliate' && affiliateCompanyId) {
       // Get the checklist to check if it belongs to the user's affiliate company
       const checklists = await getAllChecklists()
       const checklist = checklists.find(cl => cl.id === checklistId)
       return checklist?.affiliate_id === affiliateCompanyId
+    }
+
+    if (normalizedRole === 'finance') {
+      // Finance users can only access checklists for cash calls assigned to them
+      const checklists = await getAllChecklists()
+      const checklist = checklists.find(cl => cl.id === checklistId)
+      if (!checklist) return false
+      
+      const assignedCashCalls = await getCashCallsByAccess(userId)
+      const assignedCashCallIds = assignedCashCalls.map(cc => cc.id)
+      return assignedCashCallIds.includes(checklist.cash_call_id)
+    }
+
+    if (normalizedRole === 'cfo') {
+      // CFO users can only access checklists for cash calls ready for their review
+      const checklists = await getAllChecklists()
+      const checklist = checklists.find(cl => cl.id === checklistId)
+      if (!checklist) return false
+      
+      const cfoCashCalls = await getCashCallsByAccess(userId)
+      const cfoCashCallIds = cfoCashCalls.map(cc => cc.id)
+      return cfoCashCallIds.includes(checklist.cash_call_id)
     }
 
     return false
@@ -2295,15 +2542,40 @@ export async function canUserAccessChecklist(userId: string, userRole: string, a
 
 export async function canUserModifyChecklist(userId: string, userRole: string, affiliateCompanyId: string | undefined, checklistId: string) {
   try {
-    if (userRole === 'admin' || userRole === 'approver') {
+    // Normalize role to lowercase for comparison
+    const normalizedRole = userRole.toLowerCase()
+    
+    if (normalizedRole === 'admin' || normalizedRole === 'approver') {
       return true // Admins and approvers can modify all checklists
     }
 
-    if (userRole === 'affiliate' && affiliateCompanyId) {
+    if (normalizedRole === 'affiliate' && affiliateCompanyId) {
       // Affiliate users can only modify their own company's checklists
       const checklists = await getAllChecklists()
       const checklist = checklists.find(cl => cl.id === checklistId)
       return checklist?.affiliate_id === affiliateCompanyId
+    }
+
+    if (normalizedRole === 'finance') {
+      // Finance users can only modify checklists for cash calls assigned to them
+      const checklists = await getAllChecklists()
+      const checklist = checklists.find(cl => cl.id === checklistId)
+      if (!checklist) return false
+      
+      const assignedCashCalls = await getCashCallsByAccess(userId)
+      const assignedCashCallIds = assignedCashCalls.map(cc => cc.id)
+      return assignedCashCallIds.includes(checklist.cash_call_id)
+    }
+
+    if (normalizedRole === 'cfo') {
+      // CFO users can only modify checklists for cash calls ready for their review
+      const checklists = await getAllChecklists()
+      const checklist = checklists.find(cl => cl.id === checklistId)
+      if (!checklist) return false
+      
+      const cfoCashCalls = await getCashCallsByAccess(userId)
+      const cfoCashCallIds = cfoCashCalls.map(cc => cc.id)
+      return cfoCashCallIds.includes(checklist.cash_call_id)
     }
 
     return false
@@ -2311,4 +2583,1265 @@ export async function canUserModifyChecklist(userId: string, userRole: string, a
     console.error('Error checking checklist modification access:', error)
     return false
   }
+}
+
+// =====================================================
+// DOCUMENT UPLOAD FUNCTIONS
+// =====================================================
+
+export interface Document {
+  id: string
+  cash_call_id: string
+  filename: string
+  original_name: string
+  file_size: number
+  file_type: string
+  download_url: string
+  uploaded_by: string
+  uploaded_at: Date
+  description?: string
+  category?: string
+  is_public: boolean
+}
+
+export async function uploadDocument(
+  file: File,
+  cashCallId: string,
+  userId: string,
+  description?: string,
+  category?: string,
+  isPublic: boolean = true
+): Promise<Document> {
+  try {
+    console.log('=== UPLOAD DEBUG START ===')
+    console.log('Starting uploadDocument function...')
+    console.log('File:', file.name, 'Size:', file.size, 'Type:', file.type)
+    console.log('Cash Call ID:', cashCallId)
+    console.log('User ID:', userId)
+    console.log('Storage object:', storage)
+    console.log('Storage bucket:', storage.app.options.storageBucket)
+    
+    // Validate file size (removed size limit for flexibility)
+    // Note: Firebase Storage has a default limit of 5GB per file
+    if (file.size === 0) {
+      throw new Error('File cannot be empty')
+    }
+
+    // Validate file type
+    const allowedTypes = [
+      'application/pdf',
+      'application/msword',
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      'application/vnd.ms-excel',
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      'image/jpeg',
+      'image/png',
+      'image/gif',
+      'text/plain'
+    ]
+    
+    if (!allowedTypes.includes(file.type)) {
+      throw new Error('File type not allowed. Please upload PDF, Word, Excel, or image files.')
+    }
+
+    console.log('File validation passed')
+
+    // Create unique filename
+    const timestamp = Date.now()
+    const fileExtension = file.name.split('.').pop()
+    const uniqueFilename = `${cashCallId}_${timestamp}_${Math.random().toString(36).substring(2)}.${fileExtension}`
+    
+    // Upload to Firebase Storage with ultra-fast settings
+    const storageRef = ref(storage, `cash_calls/${cashCallId}/documents/${uniqueFilename}`)
+    console.log('Uploading to path:', `cash_calls/${cashCallId}/documents/${uniqueFilename}`)
+    
+    // Adaptive timeouts based on file size
+    const fileSizeMB = file.size / (1024 * 1024)
+    let timeoutMs = 30000 // Default 30 seconds
+    
+    // Calculate timeout based on file size and estimated upload speed
+    if (fileSizeMB > 100) {
+      timeoutMs = 300000 // 5 minutes for very large files
+    } else if (fileSizeMB > 50) {
+      timeoutMs = 180000 // 3 minutes for large files
+    } else if (fileSizeMB > 20) {
+      timeoutMs = 120000 // 2 minutes for medium files
+    } else if (fileSizeMB > 5) {
+      timeoutMs = 60000 // 1 minute for small files
+    }
+    
+    console.log(`Upload timeout set to ${timeoutMs/1000} seconds for ${fileSizeMB.toFixed(1)}MB file`)
+    
+    // Use simple uploadBytes for faster uploads
+    const uploadPromise = uploadBytes(storageRef, file)
+    const timeoutPromise = new Promise((_, reject) => 
+      setTimeout(() => reject(new Error(`Upload timeout after ${timeoutMs/1000} seconds - please try again`)), timeoutMs)
+    )
+    
+    const uploadResult = await Promise.race([uploadPromise, timeoutPromise]) as any
+    console.log('File uploaded to Storage successfully')
+    
+    // Get download URL
+    console.log('Getting download URL...')
+    const downloadURL = await getDownloadURL(uploadResult.ref)
+    console.log('Download URL obtained:', downloadURL)
+    
+    // Create document record in Firestore
+    console.log('Creating Firestore document record...')
+    const documentData = {
+      cash_call_id: cashCallId,
+      filename: uniqueFilename,
+      original_name: file.name,
+      file_size: file.size,
+      file_type: file.type,
+      download_url: downloadURL,
+      uploaded_by: userId,
+      uploaded_at: serverTimestamp(),
+      description: description || '',
+      category: category || 'general',
+      is_public: isPublic
+    }
+    
+    const docRef = await addDoc(collection(db, 'documents'), documentData)
+    console.log('Document record created in Firestore:', docRef.id)
+    
+    // Update cash call with document reference (if cash call exists)
+    console.log('Updating cash call with document reference...')
+    try {
+      const cashCallRef = doc(db, 'cash_calls', cashCallId)
+      await updateDoc(cashCallRef, {
+        supporting_documents: arrayUnion(docRef.id)
+      })
+      console.log('Cash call updated successfully')
+    } catch (cashCallError: any) {
+      if (cashCallError.code === 'not-found') {
+        console.log('Cash call not found, skipping update. This is normal for test uploads.')
+      } else {
+        console.warn('Failed to update cash call:', cashCallError)
+      }
+    }
+    
+    const result = {
+      id: docRef.id,
+      ...documentData,
+      uploaded_at: new Date()
+    }
+    
+    console.log('Upload completed successfully:', result)
+    console.log('=== UPLOAD DEBUG END ===')
+    return result
+  } catch (error) {
+    console.error('=== UPLOAD ERROR ===')
+    console.error('Error uploading document:', error)
+    console.error('Error details:', {
+      message: error.message,
+      code: error.code,
+      stack: error.stack
+    })
+    console.error('=== UPLOAD ERROR END ===')
+    throw error
+  }
+}
+
+export async function getDocumentsForCashCall(cashCallId: string, userId?: string, userRole?: string): Promise<Document[]> {
+  try {
+    console.log('Getting documents for cash call:', cashCallId, 'User ID:', userId, 'Role:', userRole)
+    
+    // First try with ordering (requires index)
+    try {
+      const q = query(
+        collection(db, 'documents'),
+        where('cash_call_id', '==', cashCallId),
+        orderBy('uploaded_at', 'desc')
+      )
+      
+      const querySnapshot = await getDocs(q)
+      const documents: Document[] = []
+      
+      querySnapshot.forEach((doc) => {
+        const data = doc.data()
+        const document = {
+          id: doc.id,
+          cash_call_id: data.cash_call_id,
+          filename: data.filename,
+          original_name: data.original_name,
+          file_size: data.file_size,
+          file_type: data.file_type,
+          download_url: data.download_url,
+          uploaded_by: data.uploaded_by,
+          uploaded_at: data.uploaded_at?.toDate() || new Date(),
+          description: data.description,
+          category: data.category,
+          is_public: data.is_public
+        }
+        
+        // Apply visibility rules
+        const canView = canUserViewDocument(document, userId, userRole)
+        if (canView) {
+          documents.push(document)
+        } else {
+          console.log('Document filtered out due to visibility rules:', document.original_name)
+        }
+      })
+      
+      console.log('Documents returned after filtering:', documents.length)
+      return documents
+    } catch (indexError: any) {
+      // If index is not ready, fall back to simple query and sort in memory
+      if (indexError.message.includes('index')) {
+        console.log('Index not ready, using fallback query...')
+        const q = query(
+          collection(db, 'documents'),
+          where('cash_call_id', '==', cashCallId)
+        )
+        
+        const querySnapshot = await getDocs(q)
+        const documents: Document[] = []
+        
+        querySnapshot.forEach((doc) => {
+          const data = doc.data()
+          const document = {
+            id: doc.id,
+            cash_call_id: data.cash_call_id,
+            filename: data.filename,
+            original_name: data.original_name,
+            file_size: data.file_size,
+            file_type: data.file_type,
+            download_url: data.download_url,
+            uploaded_by: data.uploaded_by,
+            uploaded_at: data.uploaded_at?.toDate() || new Date(),
+            description: data.description,
+            category: data.category,
+            is_public: data.is_public
+          }
+          
+          // Apply visibility rules
+          const canView = canUserViewDocument(document, userId, userRole)
+          if (canView) {
+            documents.push(document)
+          }
+        })
+        
+        // Sort in memory by uploaded_at descending
+        return documents.sort((a, b) => b.uploaded_at.getTime() - a.uploaded_at.getTime())
+      }
+      
+      throw indexError
+    }
+  } catch (error) {
+    console.error('Error getting documents for cash call:', error)
+    throw error
+  }
+}
+
+// Helper function to determine if a user can view a document
+function canUserViewDocument(document: Document, userId?: string, userRole?: string): boolean {
+  // Admin and approver can view all documents
+  if (userRole === 'admin' || userRole === 'approver') {
+    return true
+  }
+  
+  // Public documents can be viewed by anyone
+  if (document.is_public) {
+    return true
+  }
+  
+  // Users can view their own documents
+  if (userId && document.uploaded_by === userId) {
+    return true
+  }
+  
+  // Affiliate users can view documents from their affiliate
+  if (userRole === 'affiliate') {
+    // This would need to be enhanced based on your affiliate logic
+    return true
+  }
+  
+  return false
+}
+
+export async function deleteDocument(documentId: string, cashCallId: string, userId: string): Promise<void> {
+  try {
+    // Get document details
+    const docRef = doc(db, 'documents', documentId)
+    const docSnap = await getDoc(docRef)
+    
+    if (!docSnap.exists()) {
+      throw new Error('Document not found')
+    }
+    
+    const documentData = docSnap.data()
+    
+    // Delete from Firebase Storage
+    const storageRef = ref(storage, `cash_calls/${cashCallId}/documents/${documentData.filename}`)
+    await deleteObject(storageRef)
+    
+    // Delete from Firestore
+    await deleteDoc(docRef)
+    
+    // Remove from cash call's supporting_documents array
+    const cashCallRef = doc(db, 'cash_calls', cashCallId)
+    await updateDoc(cashCallRef, {
+      supporting_documents: arrayRemove(documentId)
+    })
+  } catch (error) {
+    console.error('Error deleting document:', error)
+    throw error
+  }
+}
+
+export async function updateDocumentMetadata(
+  documentId: string,
+  updates: {
+    description?: string
+    category?: string
+    is_public?: boolean
+  }
+): Promise<void> {
+  try {
+    const docRef = doc(db, 'documents', documentId)
+    await updateDoc(docRef, {
+      ...updates,
+      updated_at: serverTimestamp()
+    })
+  } catch (error) {
+    console.error('Error updating document metadata:', error)
+    throw error
+  }
 } 
+
+// =====================================================
+// ASSIGNMENT & ACCESS CONTROL FUNCTIONS
+// =====================================================
+
+
+
+
+
+/**
+ * Map new role names to old role names for backward compatibility
+ */
+function mapNewRoleToOld(role: string): string {
+  const roleMap: Record<string, string> = {
+    'finance': 'finance',
+    'cfo': 'cfo', 
+    'admin': 'admin',
+    'affiliate': 'affiliate',
+    'viewer': 'viewer',
+    'approver': 'approver'
+  }
+  
+  return roleMap[role] || role
+}
+
+/**
+ * Get users by role for assignment picker
+ * Used by ADMIN to assign FINANCE users to cash calls
+ */
+export async function getUsersByRole(role: 'finance' | 'cfo' | 'admin' | 'affiliate'): Promise<User[]> {
+  try {
+    // Validate role parameter
+    if (!role) {
+      throw new Error('Role parameter is required')
+    }
+    
+    console.log('Getting users by role:', role)
+    
+    // Map new roles to old roles for querying existing users
+    let queryRole = mapNewRoleToOld(role)
+    
+    console.log('Mapped query role:', queryRole)
+    
+    // Validate query role
+    if (!queryRole) {
+      throw new Error('Invalid role mapping')
+    }
+    
+    // First try with is_active filter
+    try {
+      const q = query(
+        collection(db, 'users'),
+        where('role', '==', queryRole),
+        where('is_active', '==', true),
+        orderBy('full_name')
+      )
+      
+      const querySnapshot = await getDocs(q)
+      const users: User[] = []
+      
+      querySnapshot.forEach((doc) => {
+        const data = doc.data()
+        users.push({
+          id: doc.id,
+          email: data.email,
+          full_name: data.full_name,
+          role: data.role,
+          companyId: data.companyId,
+          affiliate_company_id: data.affiliate_company_id,
+          department: data.department,
+          position: data.position,
+          phone: data.phone,
+          is_active: data.is_active,
+          last_login: data.last_login?.toDate(),
+          created_at: data.created_at?.toDate() || new Date(),
+          updated_at: data.updated_at?.toDate() || new Date(),
+          avatar_url: data.avatar_url,
+          preferences: data.preferences
+        })
+      })
+      
+      return users
+    } catch (error) {
+      console.log('Error with is_active filter, trying without it:', error)
+      
+      // Fallback: query without is_active filter
+      const q = query(
+        collection(db, 'users'),
+        where('role', '==', queryRole),
+        orderBy('full_name')
+      )
+      
+      const querySnapshot = await getDocs(q)
+      const users: User[] = []
+      
+      querySnapshot.forEach((doc) => {
+        const data = doc.data()
+        // Only include users that are active (or don't have is_active field set to false)
+        if (data.is_active !== false) {
+          users.push({
+            id: doc.id,
+            email: data.email,
+            full_name: data.full_name,
+            role: data.role,
+            companyId: data.companyId,
+            affiliate_company_id: data.affiliate_company_id,
+            department: data.department,
+            position: data.position,
+            phone: data.phone,
+            is_active: data.is_active !== false,
+            last_login: data.last_login?.toDate(),
+            created_at: data.created_at?.toDate() || new Date(),
+            updated_at: data.updated_at?.toDate() || new Date(),
+            avatar_url: data.avatar_url,
+            preferences: data.preferences
+          })
+        }
+      })
+      
+      return users
+    }
+  } catch (error) {
+    console.error('Error getting users by role:', error)
+    throw error
+  }
+}
+
+/**
+ * Assign a FINANCE user to a cash call (ADMIN only)
+ */
+export async function assignCashCallToFinance(
+  cashCallId: string, 
+  assigneeUserId: string, 
+  adminUserId: string
+): Promise<void> {
+  try {
+    // Verify admin permissions
+    const adminUser = await getUser(adminUserId)
+    console.log('Debug - Admin user role:', adminUser.role)
+    console.log('Debug - Admin user ID:', adminUserId)
+    console.log('Debug - Admin user full profile:', adminUser)
+    if (adminUser.role !== 'admin') {
+      throw new Error('Only admin users can assign cash calls')
+    }
+    
+    // Verify assignee is a FINANCE user and is active
+    const assigneeUser = await getUser(assigneeUserId)
+    const assigneeRole = assigneeUser.role === 'viewer' ? 'finance' : assigneeUser.role
+    if ((assigneeRole !== 'finance' && assigneeRole !== 'FINANCE') || !assigneeUser.is_active) {
+      throw new Error('Assignee must be an active finance user')
+    }
+    
+    // Update cash call with assignee and change status to finance_review
+    const cashCallRef = doc(db, 'cash_calls', cashCallId)
+    await updateDoc(cashCallRef, {
+      assigneeUserId: assigneeUserId,
+      status: 'finance_review',
+      updated_at: serverTimestamp()
+    })
+    
+    // Log activity
+    await addDoc(collection(db, 'activity_logs'), {
+      user_id: adminUserId,
+      action: 'ASSIGNED_FINANCE',
+      entity_type: 'cash_calls',
+      entity_id: cashCallId,
+      old_values: { assigneeUserId: null },
+      new_values: { assigneeUserId: assigneeUserId },
+      created_at: serverTimestamp(),
+      metadata: {
+        assigned_by: adminUserId,
+        assigned_to: assigneeUserId
+      }
+    })
+    
+    // Get cash call details for better notification
+    const cashCall = await getCashCall(cashCallId)
+    
+    // Send notification to assignee
+    await sendInAppNotification(assigneeUserId, {
+      type: 'assignment',
+      title: 'Cash Call Assigned',
+      message: `You have been assigned cash call "${cashCall.call_number}" for ${cashCall.affiliate_id} by ${adminUser.full_name}`,
+      cashCallId: cashCallId,
+      assignedBy: adminUserId,
+      timestamp: new Date()
+    })
+    
+  } catch (error) {
+    console.error('Error assigning cash call to finance:', error)
+    throw error
+  }
+}
+
+/**
+ * Unassign a cash call (ADMIN only)
+ */
+export async function unassignCashCall(
+  cashCallId: string, 
+  adminUserId: string
+): Promise<void> {
+  try {
+    // Verify admin permissions
+    const adminUser = await getUser(adminUserId)
+    console.log('Debug - Admin user role (unassign):', adminUser.role)
+    if (adminUser.role !== 'admin') {
+      throw new Error('Only admin users can unassign cash calls')
+    }
+    
+    // Get current assignee for activity log
+    const cashCall = await getCashCall(cashCallId)
+    const currentAssignee = cashCall.assigneeUserId
+    
+    // Update cash call to remove assignee and revert status to under_review
+    const cashCallRef = doc(db, 'cash_calls', cashCallId)
+    await updateDoc(cashCallRef, {
+      assigneeUserId: null,
+      status: 'under_review',
+      updated_at: serverTimestamp()
+    })
+    
+    // Log activity
+    await addDoc(collection(db, 'activity_logs'), {
+      user_id: adminUserId,
+      action: 'UNASSIGNED_FINANCE',
+      entity_type: 'cash_calls',
+      entity_id: cashCallId,
+      old_values: { assigneeUserId: currentAssignee },
+      new_values: { assigneeUserId: null },
+      created_at: serverTimestamp(),
+      metadata: {
+        unassigned_by: adminUserId,
+        unassigned_from: currentAssignee
+      }
+    })
+
+    // Send notification to unassigned user if they exist
+    if (currentAssignee) {
+      await sendInAppNotification(currentAssignee, {
+        type: 'unassignment',
+        title: 'Cash Call Unassigned',
+        message: `Cash call ${cashCallId} has been unassigned from you`,
+        cashCallId: cashCallId,
+        assignedBy: adminUserId,
+        timestamp: new Date()
+      })
+    }
+    
+  } catch (error) {
+    console.error('Error unassigning cash call:', error)
+    throw error
+  }
+}
+
+/**
+ * Get cash calls based on user role and access permissions
+ */
+export async function getCashCallsByAccess(
+  userId: string,
+  scope?: 'mine' | 'affiliate' | 'all'
+): Promise<CashCall[]> {
+  try {
+    console.log('getCashCallsByAccess called with userId:', userId, 'scope:', scope)
+    
+    const user = await getUser(userId)
+    console.log('User data:', { 
+      id: user.id, 
+      role: user.role, 
+      companyId: user.companyId, 
+      affiliate_company_id: user.affiliate_company_id,
+      is_active: user.is_active 
+    })
+    
+    if (!user.is_active) {
+      throw new Error('User account is not active')
+    }
+    
+    // Use role directly - no mapping needed
+    const role = user.role?.toLowerCase()?.trim()
+    console.log('User role:', role)
+    console.log('User role type:', typeof role)
+    console.log('User role length:', role?.length)
+    console.log('Original user role:', user.role)
+    
+    // Define companyId for affiliate users (needed for fallback filtering)
+    const companyId = role === 'affiliate' ? (user.companyId || user.affiliate_company_id) : null
+    console.log('User companyId:', companyId)
+    
+    // For affiliate users, log the exact query we're about to make
+    if (role === 'affiliate') {
+      console.log('Affiliate user query details:', {
+        companyId,
+        affiliate_company_id: user.affiliate_company_id,
+        queryField: 'affiliate_id',
+        queryValue: companyId
+      })
+    }
+    
+    let q: Query<DocumentData>
+    
+    switch (role) {
+      case 'affiliate':
+        // Affiliate users can only see cash calls from their company
+        if (!companyId) {
+          console.warn('Affiliate user has no companyId, returning empty array')
+          return []
+        }
+        
+        q = query(
+          collection(db, 'cash_calls'),
+          where('affiliate_id', '==', companyId),
+          orderBy('created_at', 'desc')
+        )
+        break
+        
+      case 'finance':
+      case 'viewer':
+        // Finance users see only their assigned cash calls
+        q = query(
+          collection(db, 'cash_calls'),
+          where('assigneeUserId', '==', userId),
+          orderBy('created_at', 'desc')
+        )
+        break
+        
+      case 'cfo':
+      case 'approver':
+        // CFO users see only cash calls ready for their review
+        q = query(
+          collection(db, 'cash_calls'),
+          where('status', '==', 'ready_for_cfo'),
+          orderBy('created_at', 'desc')
+        )
+        break
+        
+      case 'admin':
+        // Admin users can see all cash calls
+        q = query(
+          collection(db, 'cash_calls'),
+          orderBy('created_at', 'desc')
+        )
+        break
+        
+      default:
+        console.error('Invalid user role:', role, 'for user:', user.email)
+        throw new Error(`Invalid user role: "${role}" for user: ${user.email}`)
+    }
+    
+    // Try to execute the query with fallback for index building
+    let querySnapshot
+    
+    console.log('Executing query for role:', role, 'with companyId:', companyId)
+    try {
+      querySnapshot = await getDocs(q)
+    } catch (indexError: any) {
+      console.log('Index error, trying fallback query:', indexError.message)
+      
+      // If index is not ready, try a simpler query and sort in memory
+      if (indexError.message.includes('index')) {
+        const fallbackQuery = query(
+          collection(db, 'cash_calls'),
+          orderBy('created_at', 'desc')
+        )
+        
+        querySnapshot = await getDocs(fallbackQuery)
+        
+        // Filter in memory based on the original query conditions
+        const filteredDocs = querySnapshot.docs.filter(doc => {
+          const data = doc.data()
+          
+          switch (role) {
+            case 'affiliate':
+              return data.affiliateCompanyId === companyId || data.affiliate_id === companyId
+            case 'finance':
+            case 'viewer':
+              return data.assigneeUserId === userId
+            case 'cfo':
+            case 'approver':
+              return data.status === 'ready_for_cfo'
+            case 'admin':
+              return true
+            default:
+              return false
+          }
+        })
+        
+        // Create a new QuerySnapshot-like object with filtered docs
+        querySnapshot = {
+          docs: filteredDocs,
+          forEach: (callback: any) => filteredDocs.forEach(callback)
+        }
+      } else {
+        throw indexError
+      }
+    }
+    
+    const cashCalls: CashCall[] = []
+    
+    console.log('Query returned', querySnapshot.docs.length, 'cash calls')
+    
+    querySnapshot.forEach((doc) => {
+      const data = doc.data()
+      console.log('Cash call found:', {
+        id: doc.id,
+        affiliate_id: data.affiliate_id,
+        affiliateCompanyId: data.affiliateCompanyId,
+        call_number: data.call_number,
+        status: data.status
+      })
+      cashCalls.push({
+        id: doc.id,
+        call_number: data.call_number,
+        title: data.title,
+        affiliate_id: data.affiliate_id,
+        affiliateCompanyId: data.affiliateCompanyId || data.affiliate_id,
+        amount_requested: data.amount_requested,
+        status: data.status,
+        priority: data.priority || 'medium',
+        category: data.category,
+        subcategory: data.subcategory,
+        description: data.description,
+        currency: data.currency || 'USD',
+        exchange_rate: data.exchange_rate || 1.0,
+        amount_in_original_currency: data.amount_in_original_currency,
+        original_currency: data.original_currency,
+        payment_terms: data.payment_terms,
+        payment_method: data.payment_method,
+        bank_account_info: data.bank_account_info,
+        supporting_documents: data.supporting_documents || [],
+        rejection_reason: data.rejection_reason,
+        internal_notes: data.internal_notes,
+        external_notes: data.external_notes,
+        tags: data.tags || [],
+        risk_assessment: data.risk_assessment,
+        compliance_status: data.compliance_status || 'pending',
+        created_by: data.created_by,
+        createdByUserId: data.createdByUserId || data.created_by,
+        assigneeUserId: data.assigneeUserId,
+        created_at: data.created_at?.toDate() || new Date(),
+        updated_at: data.updated_at?.toDate() || new Date(),
+        due_date: data.due_date?.toDate(),
+        approved_at: data.approved_at?.toDate(),
+        approved_by: data.approved_by,
+        paid_at: data.paid_at?.toDate(),
+        workflow_step: data.workflow_step,
+        total_approved_amount: data.total_approved_amount,
+        remaining_amount: data.remaining_amount
+      })
+    })
+    
+    return cashCalls
+  } catch (error) {
+    console.error('Error getting cash calls by access:', error)
+    throw error
+  }
+}
+
+/**
+ * Check if user can perform action on cash call
+ */
+export async function canUserPerformAction(
+  userId: string,
+  action: 'view' | 'edit' | 'assign' | 'approve' | 'reject' | 'submit',
+  cashCallId: string
+): Promise<boolean> {
+  try {
+    const user = await getUser(userId)
+    if (!user.is_active) return false
+    
+    const cashCall = await getCashCall(cashCallId)
+    
+    // Use role directly - no mapping needed
+    const role = user.role
+    
+    switch (role) {
+      case 'affiliate':
+        // Affiliate users can only access their own company's cash calls
+        if (cashCall.affiliateCompanyId !== user.companyId) return false
+        
+        switch (action) {
+          case 'view':
+            return true
+          case 'edit':
+            return cashCall.status === 'draft'
+          case 'submit':
+            return cashCall.status === 'draft' && cashCall.created_by === userId
+          default:
+            return false
+        }
+        
+      case 'finance':
+      case 'viewer':
+        switch (action) {
+          case 'view':
+            return true // Can view all but only modify assigned
+          case 'edit':
+            return cashCall.assigneeUserId === userId && 
+                   ['submitted', 'finance_review'].includes(cashCall.status)
+          case 'approve':
+            return cashCall.assigneeUserId === userId && 
+                   cashCall.status === 'finance_review'
+          case 'reject':
+            return cashCall.assigneeUserId === userId && 
+                   ['submitted', 'finance_review'].includes(cashCall.status)
+          default:
+            return false
+        }
+        
+      case 'cfo':
+      case 'approver':
+        switch (action) {
+          case 'view':
+            return true
+          case 'approve':
+            return cashCall.status === 'ready_for_cfo'
+          case 'reject':
+            return cashCall.status === 'ready_for_cfo'
+          default:
+            return false
+        }
+        
+      case 'admin':
+        // Admin can do everything
+        return true
+        
+      default:
+        return false
+    }
+  } catch (error) {
+    console.error('Error checking user permissions:', error)
+    return false
+  }
+}
+
+/**
+ * Update cash call status (basic function without role validation)
+ */
+export async function updateCashCallStatus(
+  cashCallId: string,
+  newStatus: string,
+  userId: string
+): Promise<CashCall> {
+  try {
+    const cashCallRef = doc(db, 'cash_calls', cashCallId)
+    
+    // Get current cash call for activity log
+    const currentDoc = await getDoc(cashCallRef)
+    if (!currentDoc.exists()) {
+      throw new Error('Cash call not found')
+    }
+    
+    const oldData = currentDoc.data()
+    const oldStatus = oldData.status
+    
+    // Prepare update data
+    const updateData: any = {
+      status: newStatus,
+      updated_at: serverTimestamp()
+    }
+    
+    // Add specific fields based on status
+    if (newStatus === 'approved') {
+      updateData.approved_at = serverTimestamp()
+      updateData.approved_by = userId
+    } else if (newStatus === 'paid') {
+      updateData.paid_at = serverTimestamp()
+    }
+    
+    // Update the cash call
+    await updateDoc(cashCallRef, updateData)
+    
+    // Log activity
+    await logActivity({
+      user_id: userId,
+      action: 'STATUS_CHANGED',
+      entity_type: 'cash_calls',
+      entity_id: cashCallId,
+      old_values: { status: oldStatus },
+      new_values: { status: newStatus },
+      metadata: {
+        changed_by: userId,
+        old_status: oldStatus,
+        new_status: newStatus
+      }
+    })
+    
+    // Return updated cash call
+    const updatedDoc = await getDoc(cashCallRef)
+    const data = updatedDoc.data()
+    
+    return {
+      id: updatedDoc.id,
+      call_number: data.call_number,
+      title: data.title,
+      affiliate_id: data.affiliate_id,
+      affiliateCompanyId: data.affiliateCompanyId || data.affiliate_id,
+      amount_requested: data.amount_requested,
+      status: data.status,
+      priority: data.priority || 'medium',
+      category: data.category,
+      subcategory: data.subcategory,
+      description: data.description,
+      currency: data.currency || 'USD',
+      exchange_rate: data.exchange_rate || 1.0,
+      amount_in_original_currency: data.amount_in_original_currency,
+      original_currency: data.original_currency,
+      payment_terms: data.payment_terms,
+      payment_method: data.payment_method,
+      bank_account_info: data.bank_account_info,
+      supporting_documents: data.supporting_documents || [],
+      rejection_reason: data.rejection_reason,
+      internal_notes: data.internal_notes,
+      external_notes: data.external_notes,
+      tags: data.tags || [],
+      risk_assessment: data.risk_assessment,
+      compliance_status: data.compliance_status || 'pending',
+      created_by: data.created_by,
+      createdByUserId: data.createdByUserId || data.created_by,
+      assigneeUserId: data.assigneeUserId,
+      created_at: data.created_at?.toDate() || new Date(),
+      updated_at: data.updated_at?.toDate() || new Date(),
+      due_date: data.due_date?.toDate(),
+      approved_at: data.approved_at?.toDate(),
+      approved_by: data.approved_by,
+      paid_at: data.paid_at?.toDate(),
+      workflow_step: data.workflow_step,
+      total_approved_amount: data.total_approved_amount,
+      remaining_amount: data.remaining_amount
+    }
+  } catch (error) {
+    console.error('Error updating cash call status:', error)
+    throw error
+  }
+}
+
+/**
+ * Update cash call status with role-based validation
+ */
+export async function updateCashCallStatusWithAuth(
+  cashCallId: string,
+  newStatus: string,
+  userId: string
+): Promise<CashCall> {
+  try {
+    // Check if user can perform this action
+    const canUpdate = await canUserPerformAction(userId, 'edit', cashCallId)
+    if (!canUpdate) {
+      throw new Error('User does not have permission to update this cash call')
+    }
+    
+    const user = await getUser(userId)
+    const cashCall = await getCashCall(cashCallId)
+    
+    // Use role directly - no mapping needed
+    const role = user.role
+    
+    // Role-specific status transition validation
+    switch (role) {
+      case 'affiliate':
+        if (newStatus !== 'submitted' || cashCall.status !== 'draft') {
+          throw new Error('Affiliate users can only submit draft cash calls')
+        }
+        break
+        
+      case 'finance':
+      case 'viewer':
+        if (cashCall.assigneeUserId !== userId) {
+          throw new Error('Finance users can only update assigned cash calls')
+        }
+        if (!['submitted', 'finance_review', 'ready_for_cfo'].includes(newStatus)) {
+          throw new Error('Invalid status transition for finance user')
+        }
+        break
+        
+      case 'cfo':
+      case 'approver':
+        if (cashCall.status !== 'ready_for_cfo') {
+          throw new Error('CFO can only review cash calls ready for CFO')
+        }
+        if (!['approved', 'rejected'].includes(newStatus)) {
+          throw new Error('CFO can only approve or reject cash calls')
+        }
+        break
+        
+      case 'admin':
+        // Admin can make any status transition
+        break
+        
+      default:
+        throw new Error('Invalid user role for status update')
+    }
+    
+    // Update the cash call status
+    return await updateCashCallStatus(cashCallId, newStatus, userId)
+    
+  } catch (error) {
+    console.error('Error updating cash call status with auth:', error)
+    throw error
+  }
+}
+
+// Function to save checklist template items to Firebase
+export async function saveChecklistTemplateItems(templateItems: any) {
+  try {
+    const templateRef = doc(db, 'checklist_templates', 'default')
+    await setDoc(templateRef, {
+      items: templateItems,
+      updated_at: new Date()
+    }, { merge: true })
+  } catch (error) {
+    console.error('Error saving checklist template items:', error)
+    throw error
+  }
+}
+
+// Function to update a specific checklist item in templates
+export async function updateChecklistTemplateItem(groupKey: string, itemNo: string, updates: any) {
+  try {
+    const templateRef = doc(db, 'checklist_templates', 'default')
+    const templateDoc = await getDoc(templateRef)
+    
+    let currentItems = availableChecklistItems
+    
+    if (templateDoc.exists()) {
+      currentItems = templateDoc.data().items || availableChecklistItems
+    }
+    
+    // Update the specific item
+    const updatedItems = { ...currentItems }
+    if (updatedItems[groupKey]) {
+      const itemIndex = updatedItems[groupKey].findIndex((item: any) => item.itemNo === itemNo)
+      if (itemIndex !== -1) {
+        updatedItems[groupKey][itemIndex] = { ...updatedItems[groupKey][itemIndex], ...updates }
+      }
+    }
+    
+    // Save back to Firebase
+    await setDoc(templateRef, {
+      items: updatedItems,
+      updated_at: new Date()
+    }, { merge: true })
+    
+    return updatedItems
+  } catch (error) {
+    console.error('Error updating checklist template item:', error)
+    throw error
+  }
+}
+
+// Function to add a new checklist item to templates
+export async function addChecklistTemplateItem(groupKey: string, newItem: any) {
+  try {
+    const templateRef = doc(db, 'checklist_templates', 'default')
+    const templateDoc = await getDoc(templateRef)
+    
+    let currentItems = availableChecklistItems
+    
+    if (templateDoc.exists()) {
+      currentItems = templateDoc.data().items || availableChecklistItems
+    }
+    
+    // Add the new item
+    const updatedItems = { ...currentItems }
+    if (!updatedItems[groupKey]) {
+      updatedItems[groupKey] = []
+    }
+    
+    updatedItems[groupKey].push({
+      ...newItem,
+      status: "Not Started"
+    })
+    
+    // Save back to Firebase
+    await setDoc(templateRef, {
+      items: updatedItems,
+      updated_at: new Date()
+    }, { merge: true })
+    
+    return updatedItems
+  } catch (error) {
+    console.error('Error adding checklist template item:', error)
+    throw error
+  }
+}
+
+// Function to delete a checklist item from templates
+export async function deleteChecklistTemplateItem(groupKey: string, itemNo: string) {
+  try {
+    const templateRef = doc(db, 'checklist_templates', 'default')
+    const templateDoc = await getDoc(templateRef)
+    
+    let currentItems = availableChecklistItems
+    
+    if (templateDoc.exists()) {
+      currentItems = templateDoc.data().items || availableChecklistItems
+    }
+    
+    // Remove the item
+    const updatedItems = { ...currentItems }
+    if (updatedItems[groupKey]) {
+      updatedItems[groupKey] = updatedItems[groupKey].filter((item: any) => item.itemNo !== itemNo)
+    }
+    
+    // Save back to Firebase
+    await setDoc(templateRef, {
+      items: updatedItems,
+      updated_at: new Date()
+    }, { merge: true })
+    
+    return updatedItems
+  } catch (error) {
+    console.error('Error deleting checklist template item:', error)
+    throw error
+  }
+}
+
+// =====================================================
+// DOCUMENT REQUIREMENTS FUNCTIONS
+// =====================================================
+
+// Get document requirements for an affiliate (includes global requirements)
+export async function getDocumentRequirements(affiliateId: string, cashCallType?: 'opex' | 'capex'): Promise<DocumentRequirement[]> {
+  try {
+    // Get both affiliate-specific and global requirements without ordering in Firestore
+    const [affiliateSpecificQuery, globalQuery] = await Promise.all([
+      getDocs(query(
+        collection(db, 'document_requirements'),
+        where('affiliate_id', '==', affiliateId)
+      )),
+      getDocs(query(
+        collection(db, 'document_requirements'),
+        where('is_global', '==', true)
+      ))
+    ])
+
+    const affiliateSpecific = affiliateSpecificQuery.docs.map(doc => ({
+      id: doc.id,
+      ...doc.data(),
+      created_at: doc.data().created_at?.toDate() || new Date(),
+      updated_at: doc.data().updated_at?.toDate() || new Date()
+    })) as DocumentRequirement[]
+
+    const global = globalQuery.docs.map(doc => ({
+      id: doc.id,
+      ...doc.data(),
+      created_at: doc.data().created_at?.toDate() || new Date(),
+      updated_at: doc.data().updated_at?.toDate() || new Date()
+    })) as DocumentRequirement[]
+
+    // Combine and sort by order_index in memory to avoid index requirements
+    let allRequirements = [...affiliateSpecific, ...global]
+    
+    // Filter by cash call type if specified
+    if (cashCallType) {
+      allRequirements = allRequirements.filter(req => 
+        req.applies_to === 'both' || req.applies_to === cashCallType
+      )
+    }
+    
+    return allRequirements.sort((a, b) => a.order_index - b.order_index)
+  } catch (error) {
+    console.error('Error getting document requirements:', error)
+    throw error
+  }
+}
+
+// Create a new document requirement
+export async function createDocumentRequirement(requirement: Omit<DocumentRequirement, 'id' | 'created_at' | 'updated_at'>): Promise<string> {
+  try {
+    // Filter out undefined values to prevent Firebase errors
+    const cleanRequirement = Object.fromEntries(
+      Object.entries(requirement).filter(([_, value]) => value !== undefined)
+    )
+    
+    const docRef = await addDoc(collection(db, 'document_requirements'), {
+      ...cleanRequirement,
+      created_at: serverTimestamp(),
+      updated_at: serverTimestamp()
+    })
+    return docRef.id
+  } catch (error) {
+    console.error('Error creating document requirement:', error)
+    throw error
+  }
+}
+
+// Update a document requirement
+export async function updateDocumentRequirement(id: string, updates: Partial<DocumentRequirement>): Promise<void> {
+  try {
+    const docRef = doc(db, 'document_requirements', id)
+    
+    // Filter out undefined values to prevent Firebase errors
+    const cleanUpdates = Object.fromEntries(
+      Object.entries(updates).filter(([_, value]) => value !== undefined)
+    )
+    
+    await updateDoc(docRef, {
+      ...cleanUpdates,
+      updated_at: serverTimestamp()
+    })
+  } catch (error) {
+    console.error('Error updating document requirement:', error)
+    throw error
+  }
+}
+
+// Delete a document requirement
+export async function deleteDocumentRequirement(id: string): Promise<void> {
+  try {
+    const docRef = doc(db, 'document_requirements', id)
+    await deleteDoc(docRef)
+  } catch (error) {
+    console.error('Error deleting document requirement:', error)
+    throw error
+  }
+}
+
+// Get all document requirements (for admin view)
+export async function getAllDocumentRequirements(): Promise<DocumentRequirement[]> {
+  try {
+    // Get all documents without ordering to avoid issues with null affiliate_id values
+    const querySnapshot = await getDocs(collection(db, 'document_requirements'))
+    const requirements = querySnapshot.docs.map(doc => ({
+      id: doc.id,
+      ...doc.data(),
+      created_at: doc.data().created_at?.toDate() || new Date(),
+      updated_at: doc.data().updated_at?.toDate() || new Date()
+    })) as DocumentRequirement[]
+    
+    // Sort by order_index in memory to avoid complex index
+    return requirements.sort((a, b) => a.order_index - b.order_index)
+  } catch (error) {
+    console.error('Error getting all document requirements:', error)
+    throw error
+  }
+}

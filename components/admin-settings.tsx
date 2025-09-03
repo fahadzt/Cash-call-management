@@ -41,6 +41,7 @@ import {
   type Affiliate,
   type User
 } from "@/lib/firebase-database"
+import Link from "next/link"
 import { checklistDb, type StatusOption } from "@/lib/checklist-database"
 
 interface AdminSettingsProps {
@@ -344,6 +345,14 @@ export function AdminSettings({ currentUser, onDataChange }: AdminSettingsProps)
           <DialogDescription className="text-white/80">
             Manage users, roles, affiliates, and status options for the cash call system.
           </DialogDescription>
+          <div className="flex justify-end">
+            <Link href="/admin/document-requirements">
+              <Button variant="outline" size="sm" className="border-[#00A3E0] text-[#00A3E0] hover:bg-[#00A3E0]/10 bg-transparent">
+                <Tag className="h-4 w-4 mr-2" />
+                Document Requirements
+              </Button>
+            </Link>
+          </div>
         </DialogHeader>
 
         {/* Success/Error Messages */}
